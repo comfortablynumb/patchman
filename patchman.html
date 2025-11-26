@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Patchman</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="jsonTree.css">
+</head>
+<body class="bg-gradient-to-br from-slate-900 to-slate-800 text-white min-h-screen">
+  <div class="max-w-4xl mx-auto p-8">
+    <div class="space-y-6">
+      <!-- Header -->
+      <div class="flex items-center gap-3 mb-8">
+        <div class="w-12 h-12 bg-gradient-to-r from-indigo-500 to-purple-500 rounded-xl flex items-center justify-center shadow-lg shadow-indigo-500/25">
+          <svg class="w-7 h-7 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+          </svg>
+        </div>
+        <div>
+          <h1 class="text-3xl font-bold bg-gradient-to-r from-indigo-400 to-purple-400 bg-clip-text text-transparent">Patchman</h1>
+          <p class="text-slate-400 text-sm">Simple & Beautiful HTTP Client</p>
+        </div>
+      </div>
+
+      <!-- Method Selector & URL -->
+      <div class="flex gap-2">
+        <select id="method-select" class="px-3 py-2 font-semibold text-sm">
+          <option value="GET">GET</option>
+          <option value="POST">POST</option>
+          <option value="PUT">PUT</option>
+          <option value="PATCH">PATCH</option>
+          <option value="DELETE">DELETE</option>
+          <option value="HEAD">HEAD</option>
+          <option value="OPTIONS">OPTIONS</option>
+        </select>
+        <input type="text" id="url-input" placeholder="https://api.example.com/endpoint"
+          class="flex-1 px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition-all placeholder-slate-400 text-sm">
+        <button id="send-btn" class="px-5 py-2 bg-gradient-to-r from-indigo-500 to-purple-500 hover:from-indigo-600 hover:to-purple-600 rounded-lg font-semibold text-sm transition-all flex items-center gap-2 shadow-lg shadow-indigo-500/25">
+          <span>Send</span>
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3"/>
+          </svg>
+        </button>
+      </div>
+
+      <!-- Request Config Tabs -->
+      <div class="bg-slate-800/50 rounded-xl border border-slate-700 overflow-hidden">
+        <!-- Tab Headers -->
+        <div class="flex border-b border-slate-700">
+          <button data-request-tab="params" class="request-tab active px-4 py-2 text-sm font-medium transition-all">Params</button>
+          <button data-request-tab="headers" class="request-tab px-4 py-2 text-sm font-medium transition-all">Headers</button>
+          <button data-request-tab="auth" class="request-tab px-4 py-2 text-sm font-medium transition-all">Auth</button>
+          <button data-request-tab="body" class="request-tab px-4 py-2 text-sm font-medium transition-all">Body</button>
+        </div>
+
+        <!-- Tab Contents -->
+        <div class="p-4">
+          <!-- Params Tab -->
+          <div id="params-tab" class="request-tab-content">
+            <div id="params-container" class="space-y-2">
+              <div class="param-row flex gap-2 items-center">
+                <input type="text" placeholder="Key" class="param-key flex-1 px-3 py-1.5 bg-slate-700/50 border border-slate-600 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500">
+                <input type="text" placeholder="Value" class="param-value flex-1 px-3 py-1.5 bg-slate-700/50 border border-slate-600 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500">
+                <button class="remove-param-btn p-1.5 text-slate-400 hover:text-red-400 transition-all" title="Remove">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <button id="add-param-btn" class="mt-2 px-3 py-1.5 text-sm text-indigo-400 hover:text-indigo-300 transition-all flex items-center gap-1">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+              </svg>
+              Add Parameter
+            </button>
+          </div>
+
+          <!-- Headers Tab -->
+          <div id="headers-tab" class="request-tab-content hidden">
+            <div id="headers-container" class="space-y-2">
+              <div class="header-row flex gap-2 items-center">
+                <input type="text" placeholder="Header name" class="header-key flex-1 px-3 py-1.5 bg-slate-700/50 border border-slate-600 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500">
+                <input type="text" placeholder="Value" class="header-value flex-1 px-3 py-1.5 bg-slate-700/50 border border-slate-600 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500">
+                <button class="remove-header-btn p-1.5 text-slate-400 hover:text-red-400 transition-all" title="Remove">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <button id="add-header-btn" class="mt-2 px-3 py-1.5 text-sm text-indigo-400 hover:text-indigo-300 transition-all flex items-center gap-1">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+              </svg>
+              Add Header
+            </button>
+          </div>
+
+          <!-- Auth Tab -->
+          <div id="auth-tab" class="request-tab-content hidden">
+            <div class="space-y-3">
+              <div>
+                <label class="block text-sm font-medium text-slate-300 mb-1">Authentication Type</label>
+                <select id="auth-type" class="w-full px-3 py-2 text-sm">
+                  <option value="none">No Auth</option>
+                  <option value="basic">Basic Auth</option>
+                  <option value="bearer">Bearer Token</option>
+                  <option value="api-key">API Key</option>
+                </select>
+              </div>
+
+              <!-- Basic Auth Fields -->
+              <div id="auth-basic" class="auth-fields hidden space-y-2">
+                <div>
+                  <label class="block text-sm text-slate-400 mb-1">Username</label>
+                  <input type="text" id="auth-basic-username" placeholder="Username" class="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500">
+                </div>
+                <div>
+                  <label class="block text-sm text-slate-400 mb-1">Password</label>
+                  <input type="password" id="auth-basic-password" placeholder="Password" class="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500">
+                </div>
+              </div>
+
+              <!-- Bearer Token Fields -->
+              <div id="auth-bearer" class="auth-fields hidden">
+                <label class="block text-sm text-slate-400 mb-1">Token</label>
+                <input type="text" id="auth-bearer-token" placeholder="Enter token" class="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500">
+              </div>
+
+              <!-- API Key Fields -->
+              <div id="auth-api-key" class="auth-fields hidden space-y-2">
+                <div>
+                  <label class="block text-sm text-slate-400 mb-1">Key Name</label>
+                  <input type="text" id="auth-api-key-name" placeholder="X-API-Key" class="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500">
+                </div>
+                <div>
+                  <label class="block text-sm text-slate-400 mb-1">Key Value</label>
+                  <input type="text" id="auth-api-key-value" placeholder="Your API key" class="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500">
+                </div>
+                <div>
+                  <label class="block text-sm text-slate-400 mb-1">Add to</label>
+                  <select id="auth-api-key-location" class="w-full px-3 py-2 text-sm">
+                    <option value="header">Header</option>
+                    <option value="query">Query Params</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Body Tab -->
+          <div id="body-tab" class="request-tab-content hidden">
+            <div class="space-y-3">
+              <!-- Body Type Selector -->
+              <div class="flex gap-2 flex-wrap">
+                <button data-body-type="none" class="body-type-btn active px-3 py-1.5 rounded-lg text-sm font-medium transition-all">None</button>
+                <button data-body-type="json" class="body-type-btn px-3 py-1.5 rounded-lg text-sm font-medium transition-all">JSON</button>
+                <button data-body-type="xml" class="body-type-btn px-3 py-1.5 rounded-lg text-sm font-medium transition-all">XML</button>
+                <button data-body-type="form" class="body-type-btn px-3 py-1.5 rounded-lg text-sm font-medium transition-all">Form URL-Encoded</button>
+                <button data-body-type="raw" class="body-type-btn px-3 py-1.5 rounded-lg text-sm font-medium transition-all">Raw</button>
+              </div>
+
+              <!-- Body None -->
+              <div id="body-none" class="body-content">
+                <p class="text-slate-500 text-sm py-6 text-center">This request does not have a body</p>
+              </div>
+
+              <!-- Body JSON -->
+              <div id="body-json" class="body-content hidden">
+                <textarea id="body-json-input" rows="6" placeholder='{"key": "value"}'
+                  class="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg font-mono text-sm outline-none focus:ring-2 focus:ring-indigo-500 resize-y"></textarea>
+              </div>
+
+              <!-- Body XML -->
+              <div id="body-xml" class="body-content hidden">
+                <textarea id="body-xml-input" rows="6" placeholder='<?xml version="1.0"?>
+<root>
+  <element>value</element>
+</root>'
+                  class="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg font-mono text-sm outline-none focus:ring-2 focus:ring-indigo-500 resize-y"></textarea>
+              </div>
+
+              <!-- Body Form URL-Encoded -->
+              <div id="body-form" class="body-content hidden">
+                <div id="form-fields-container" class="space-y-2">
+                  <div class="form-field-row flex gap-2 items-center">
+                    <input type="text" placeholder="Key" class="form-field-key flex-1 px-3 py-1.5 bg-slate-700/50 border border-slate-600 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500">
+                    <input type="text" placeholder="Value" class="form-field-value flex-1 px-3 py-1.5 bg-slate-700/50 border border-slate-600 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500">
+                    <button class="remove-form-field-btn p-1.5 text-slate-400 hover:text-red-400 transition-all" title="Remove">
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+                <button id="add-form-field-btn" class="mt-2 px-3 py-1.5 text-sm text-indigo-400 hover:text-indigo-300 transition-all flex items-center gap-1">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+                  </svg>
+                  Add Field
+                </button>
+              </div>
+
+              <!-- Body Raw -->
+              <div id="body-raw" class="body-content hidden">
+                <div class="mb-2">
+                  <input type="text" id="body-raw-content-type" placeholder="Content-Type (e.g., text/plain)"
+                    class="w-full px-3 py-1.5 bg-slate-700/50 border border-slate-600 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500">
+                </div>
+                <textarea id="body-raw-input" rows="6" placeholder="Enter raw body content..."
+                  class="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded-lg font-mono text-sm outline-none focus:ring-2 focus:ring-indigo-500 resize-y"></textarea>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Loading -->
+      <div id="loading" class="hidden flex items-center justify-center py-6">
+        <div class="loader"></div>
+        <span class="ml-4 text-slate-400 text-lg">Sending request...</span>
+      </div>
+
+      <!-- Response Section -->
+      <div id="response-section" class="hidden">
+        <div class="flex items-center justify-between mb-3">
+          <label class="text-lg font-medium text-slate-300">Response</label>
+          <div class="flex items-center gap-3">
+            <span id="status-badge" class="px-3 py-1.5 rounded-lg text-sm font-semibold"></span>
+            <span id="response-time" class="text-sm text-slate-400"></span>
+          </div>
+        </div>
+
+        <!-- Response Tabs -->
+        <div class="flex gap-2 mb-3">
+          <button data-tab="body" class="tab-btn active px-4 py-2 rounded-lg text-sm font-medium bg-slate-700 text-white transition-all">Body</button>
+          <button data-tab="headers" class="tab-btn px-4 py-2 rounded-lg text-sm font-medium bg-slate-800 text-slate-400 hover:text-white transition-all">Headers</button>
+        </div>
+
+        <div id="response-body-tab" class="tab-content">
+          <!-- Body View Tabs (Tree/Raw) - only shown for JSON -->
+          <div id="body-view-tabs" class="flex gap-1 mb-2 hidden">
+            <button data-body-view="tree" class="body-view-btn active px-3 py-1 rounded text-sm bg-slate-700 text-white transition-all">Tree</button>
+            <button data-body-view="raw" class="body-view-btn px-3 py-1 rounded text-sm bg-slate-800 text-slate-400 hover:text-white transition-all">Raw</button>
+          </div>
+          <div id="response-tree-view" class="w-full p-4 bg-slate-950 border border-slate-700 rounded-xl text-sm max-h-500 overflow-auto hidden"></div>
+          <pre id="response-body" class="w-full p-4 bg-slate-950 border border-slate-700 rounded-xl text-sm font-mono text-slate-300 max-h-500 overflow-auto"></pre>
+        </div>
+        <div id="response-headers-tab" class="tab-content hidden">
+          <pre id="response-headers" class="w-full p-5 bg-slate-950 border border-slate-700 rounded-xl text-sm font-mono text-slate-300 max-h-500 overflow-auto"></pre>
+        </div>
+      </div>
+
+      <!-- Error Section -->
+      <div id="error-section" class="hidden">
+        <div class="p-5 bg-red-500/10 border border-red-500/30 rounded-xl">
+          <div class="flex items-center gap-3 text-red-400 mb-3">
+            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+            <span class="font-semibold text-lg">Error</span>
+          </div>
+          <p id="error-message" class="text-sm text-red-300"></p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="jquery.min.js"></script>
+  <script src="jsonTree.js"></script>
+  <script src="patchman.js"></script>
+</body>
+</html>
