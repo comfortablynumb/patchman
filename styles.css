@@ -357,75 +357,104 @@ select option {
 
 /* JSON Tree dark theme overrides */
 .jsontree_tree {
-  margin-left: 10px;
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
-  font-size: 13px;
-  line-height: 1.6;
+  margin-left: 10px !important;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace !important;
+  font-size: 13px !important;
+  color: #cbd5e1 !important;
+  list-style: none !important;
+  padding-left: 0 !important;
 }
 
-.jsontree_label {
-  color: #c084fc;
+.jsontree_tree ul {
+  list-style: none !important;
+  padding-left: 16px !important;
+  margin: 0 !important;
 }
 
-.jsontree_value_null {
-  color: #94a3b8;
-  font-weight: normal;
-  font-style: italic;
+.jsontree_tree > li {
+  padding-left: 0 !important;
 }
 
-.jsontree_value_string {
-  color: #4ade80;
-  font-weight: normal;
+.jsontree_tree li {
+  list-style: none !important;
+  margin: 0 !important;
+  padding: 1px 0 !important;
 }
 
-.jsontree_value_number {
-  color: #60a5fa;
-  font-weight: normal;
-}
-
-.jsontree_value_boolean {
-  color: #f472b6;
-  font-weight: normal;
+.jsontree_node {
+  margin: 0 !important;
 }
 
 .jsontree_child-nodes {
-  margin-left: 20px;
-  line-height: 1.6;
+  margin-left: 0 !important;
+  margin-top: 0 !important;
+  margin-bottom: 0 !important;
+  padding-left: 16px !important;
+  line-height: 1.3 !important;
+}
+
+.jsontree_label {
+  color: #c084fc !important;
+}
+
+.jsontree_value {
+  color: #cbd5e1 !important;
+}
+
+.jsontree_value_null {
+  color: #94a3b8 !important;
+  font-weight: normal !important;
+  font-style: italic !important;
+}
+
+.jsontree_value_string {
+  color: #4ade80 !important;
+  font-weight: normal !important;
+}
+
+.jsontree_value_number {
+  color: #60a5fa !important;
+  font-weight: normal !important;
+}
+
+.jsontree_value_boolean {
+  color: #f472b6 !important;
+  font-weight: normal !important;
 }
 
 .jsontree_node_marked > .jsontree_label-wrapper > .jsontree_label {
-  background: rgba(99, 102, 241, 0.3);
+  background: rgba(99, 102, 241, 0.3) !important;
 }
 
 /* Custom expand/collapse indicators */
 .jsontree_expand-button {
-  display: none;
+  display: none !important;
 }
 
 .jsontree_node_complex > .jsontree_label-wrapper > .jsontree_label::before {
-  content: '▶';
-  display: inline-block;
-  margin-right: 6px;
-  font-size: 10px;
-  color: #64748b;
-  transition: transform 0.15s;
+  content: '▶' !important;
+  display: inline-block !important;
+  margin-right: 5px !important;
+  font-size: 9px !important;
+  color: #64748b !important;
+  transition: transform 0.15s !important;
 }
 
 .jsontree_node_expanded > .jsontree_label-wrapper > .jsontree_label::before {
-  transform: rotate(90deg);
+  transform: rotate(90deg) !important;
 }
 
 .jsontree_node_empty > .jsontree_label-wrapper > .jsontree_label::before {
-  visibility: hidden;
+  visibility: hidden !important;
 }
 
 .jsontree_show-more {
-  color: #64748b;
-  cursor: pointer;
+  color: #64748b !important;
+  cursor: pointer !important;
 }
 
 .jsontree_show-more:hover {
-  color: #94a3b8;
+  color: #94a3b8 !important;
 }
 
 /* Body view button styles */
