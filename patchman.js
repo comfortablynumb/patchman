@@ -8,6 +8,588 @@ $(document).ready(function() {
   // Load collections from storage
   loadCollections();
 
+  // Variables management
+  let variables = {};  // Global variables
+  let environments = {};  // Environment-specific variables { envName: { varName: value } }
+  let currentEnvironment = '';  // Currently selected environment
+
+  loadVariables();
+
+  function loadVariables() {
+    chrome.storage.local.get(['patchman_variables', 'patchman_environments', 'patchman_current_env'], function(result) {
+      variables = result.patchman_variables || {};
+      environments = result.patchman_environments || {};
+      currentEnvironment = result.patchman_current_env || '';
+      renderEnvironments();
+      renderVariables();
+    });
+  }
+
+  function saveVariables() {
+    chrome.storage.local.set({
+      patchman_variables: variables,
+      patchman_environments: environments,
+      patchman_current_env: currentEnvironment
+    }, function() {
+      renderEnvironments();
+      updateVariablesWithDetected();
+    });
+  }
+
+  function renderVariables() {
+    // Use the enhanced rendering that detects used variables
+    updateVariablesWithDetected();
+  }
+
+  function renderEnvironments() {
+    const $select = $('#environment-select');
+    const currentVal = currentEnvironment;
+
+    $select.find('option:not([value=""])').remove();
+
+    Object.keys(environments).sort().forEach(function(envName) {
+      $select.append(`<option value="${escapeHtml(envName)}">${escapeHtml(envName)}</option>`);
+    });
+
+    $select.val(currentVal);
+  }
+
+  // Current variable scope tab
+  let currentVarScope = 'detected';
+
+  // Variable scope tab switching
+  $('.variables-tab').on('click', function() {
+    currentVarScope = $(this).data('var-scope');
+    $('.variables-tab').removeClass('active');
+    $(this).addClass('active');
+    updateVariablesWithDetected();
+  });
+
+  // Environment selection
+  $('#environment-select').on('change', function() {
+    currentEnvironment = $(this).val();
+    saveVariables();
+  });
+
+  // Manage environments
+  $('#manage-environments-btn').on('click', function() {
+    showEnvironmentManager();
+  });
+
+  function showEnvironmentManager() {
+    const envList = Object.keys(environments).map(name => `
+      <div class="env-manager-item" data-env-name="${escapeHtml(name)}">
+        <span class="env-manager-name">${escapeHtml(name)}</span>
+        <button class="env-manager-edit" title="Edit">
+          <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
+          </svg>
+        </button>
+        <button class="env-manager-delete" title="Delete">
+          <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+          </svg>
+        </button>
+      </div>
+    `).join('');
+
+    const $modal = $(`
+      <div class="modal-overlay">
+        <div class="modal" style="min-width: 400px;">
+          <h3 class="modal-title">Manage Environments</h3>
+          <div class="env-manager-list">
+            ${envList || '<p class="text-slate-500 text-sm text-center py-4">No environments yet</p>'}
+          </div>
+          <div class="env-manager-add">
+            <input type="text" class="modal-input" id="new-env-name" placeholder="New environment name..." style="margin-bottom: 0.5rem;">
+            <button class="modal-btn modal-btn-primary" id="add-env-btn" style="width: 100%;">Add Environment</button>
+          </div>
+          <div class="modal-actions" style="margin-top: 1rem;">
+            <button class="modal-btn modal-btn-secondary close-modal-btn">Close</button>
+          </div>
+        </div>
+      </div>
+    `);
+
+    $('body').append($modal);
+
+    $modal.find('.close-modal-btn').on('click', () => $modal.remove());
+    $modal.on('click', function(e) {
+      if ($(e.target).hasClass('modal-overlay')) $modal.remove();
+    });
+
+    $modal.find('#add-env-btn').on('click', function() {
+      const name = $modal.find('#new-env-name').val().trim();
+      if (name && !environments.hasOwnProperty(name)) {
+        environments[name] = {};
+        saveVariables();
+        $modal.remove();
+        showEnvironmentManager();
+      }
+    });
+
+    $modal.find('#new-env-name').on('keypress', function(e) {
+      if (e.which === 13) $modal.find('#add-env-btn').click();
+    });
+
+    $modal.on('click', '.env-manager-edit', function() {
+      const envName = $(this).closest('.env-manager-item').data('env-name');
+      $modal.remove();
+      currentEnvironment = envName;
+      currentVarScope = 'environment';
+      $('.variables-tab').removeClass('active');
+      $('.variables-tab[data-var-scope="environment"]').addClass('active');
+      saveVariables();
+    });
+
+    $modal.on('click', '.env-manager-delete', function() {
+      const envName = $(this).closest('.env-manager-item').data('env-name');
+      if (confirm(`Delete environment "${envName}"?`)) {
+        delete environments[envName];
+        if (currentEnvironment === envName) {
+          currentEnvironment = '';
+        }
+        saveVariables();
+        $modal.remove();
+        showEnvironmentManager();
+      }
+    });
+  }
+
+  // Add new variable
+  $('#add-variable-btn').on('click', function(e) {
+    e.stopPropagation();
+
+    // Generate unique name
+    let baseName = 'new_var';
+    let name = baseName;
+    let counter = 1;
+
+    // Check based on current scope
+    const targetVars = getVariablesForScope(currentVarScope);
+    while (targetVars.hasOwnProperty(name)) {
+      name = `${baseName}_${counter}`;
+      counter++;
+    }
+
+    // Add to appropriate scope
+    addVariableToScope(name, '', currentVarScope);
+
+    // Focus on the new variable name input
+    setTimeout(function() {
+      const $newItem = $(`.variable-item[data-var-name="${name}"]`);
+      $newItem.find('.variable-name').focus().select();
+    }, 50);
+  });
+
+  function getVariablesForScope(scope) {
+    switch (scope) {
+      case 'global':
+        return variables;
+      case 'environment':
+        if (currentEnvironment && environments[currentEnvironment]) {
+          return environments[currentEnvironment];
+        }
+        return {};
+      case 'collection':
+        if (currentCollectionId) {
+          const collection = collections.find(c => c.id === currentCollectionId);
+          if (collection) {
+            if (!collection.variables) collection.variables = {};
+            return collection.variables;
+          }
+        }
+        return {};
+      default:
+        return getEffectiveVariables();
+    }
+  }
+
+  function addVariableToScope(name, value, scope) {
+    switch (scope) {
+      case 'global':
+      case 'detected':
+        variables[name] = value;
+        break;
+      case 'environment':
+        if (currentEnvironment) {
+          if (!environments[currentEnvironment]) environments[currentEnvironment] = {};
+          environments[currentEnvironment][name] = value;
+        } else {
+          // No environment selected, add to global
+          variables[name] = value;
+        }
+        break;
+      case 'collection':
+        if (currentCollectionId) {
+          const collection = collections.find(c => c.id === currentCollectionId);
+          if (collection) {
+            if (!collection.variables) collection.variables = {};
+            collection.variables[name] = value;
+            saveCollections();
+            updateVariablesWithDetected();
+            return;
+          }
+        }
+        // Fallback to global
+        variables[name] = value;
+        break;
+    }
+    saveVariables();
+  }
+
+  // Update variable name
+  $(document).on('blur', '.variable-name', function() {
+    if ($(this).prop('readonly')) return;
+
+    const $item = $(this).closest('.variable-item');
+    const oldName = $item.data('var-name');
+    const scope = $item.data('var-scope') || currentVarScope;
+    const newName = $(this).val().trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+
+    if (!newName) {
+      $(this).val(oldName);
+      return;
+    }
+
+    if (newName !== oldName) {
+      const targetVars = getVariablesForScopeByName(scope);
+      if (targetVars.hasOwnProperty(newName)) {
+        $(this).val(oldName);
+        showError(`Variable "${newName}" already exists`);
+        return;
+      }
+
+      const value = targetVars[oldName];
+      delete targetVars[oldName];
+      targetVars[newName] = value;
+      $item.data('var-name', newName);
+      saveVariablesForScope(scope);
+    }
+  });
+
+  // Update variable value
+  $(document).on('blur', '.variable-value', function() {
+    const $item = $(this).closest('.variable-item');
+    const name = $item.data('var-name');
+    const scope = $item.data('var-scope') || currentVarScope;
+    const value = $(this).val();
+
+    const targetVars = getVariablesForScopeByName(scope);
+    targetVars[name] = value;
+    saveVariablesForScope(scope);
+  });
+
+  // Delete variable
+  $(document).on('click', '.variable-delete', function() {
+    const $item = $(this).closest('.variable-item');
+    const name = $item.data('var-name');
+    const scope = $item.data('var-scope') || currentVarScope;
+
+    const targetVars = getVariablesForScopeByName(scope);
+    delete targetVars[name];
+    saveVariablesForScope(scope);
+  });
+
+  function getVariablesForScopeByName(scope) {
+    switch (scope) {
+      case 'global':
+        return variables;
+      case 'env':
+      case 'environment':
+        if (currentEnvironment && environments[currentEnvironment]) {
+          return environments[currentEnvironment];
+        }
+        return variables; // Fallback
+      case 'collection':
+        if (currentCollectionId) {
+          const collection = collections.find(c => c.id === currentCollectionId);
+          if (collection) {
+            if (!collection.variables) collection.variables = {};
+            return collection.variables;
+          }
+        }
+        return variables; // Fallback
+      default:
+        return variables;
+    }
+  }
+
+  function saveVariablesForScope(scope) {
+    if (scope === 'collection') {
+      saveCollections();
+      updateVariablesWithDetected();
+    } else {
+      saveVariables();
+    }
+  }
+
+  // Detect variables used in the request
+  // Returns { usedVars: Set, varsWithDefaults: Set }
+  function detectUsedVariables() {
+    const usedVars = new Set();
+    const varsWithDefaults = new Set();
+    // Match ${var:name} or ${var:name:default} - capture name and check if default exists
+    const varRegex = /\$\{var:([a-zA-Z0-9_-]+)(:([^}]*))?\}/g;
+
+    function scanText(text) {
+      if (!text) return;
+      varRegex.lastIndex = 0;
+      let match;
+      while ((match = varRegex.exec(text)) !== null) {
+        usedVars.add(match[1]);
+        // If there's a default value (match[2] exists and match[3] is the default)
+        if (match[2] !== undefined) {
+          varsWithDefaults.add(match[1]);
+        }
+      }
+    }
+
+    // Scan URL
+    scanText($('#url-input').val());
+
+    // Scan params
+    $('#params-container .param-row').each(function() {
+      scanText($(this).find('.param-key').val());
+      scanText($(this).find('.param-value').val());
+    });
+
+    // Scan headers
+    $('#headers-container .header-row').each(function() {
+      scanText($(this).find('.header-key').val());
+      scanText($(this).find('.header-value').val());
+    });
+
+    // Scan auth fields
+    const authFields = [
+      '#auth-basic-username', '#auth-basic-password',
+      '#auth-bearer-token',
+      '#auth-api-key-name', '#auth-api-key-value'
+    ];
+    authFields.forEach(selector => scanText($(selector).val()));
+
+    // Scan body fields
+    const bodyFields = [
+      '#body-json-input', '#body-xml-input', '#body-raw-input', '#body-raw-content-type'
+    ];
+    bodyFields.forEach(selector => scanText($(selector).val()));
+
+    // Scan form fields
+    $('#form-fields-container .form-field-row').each(function() {
+      scanText($(this).find('.form-field-key').val());
+      scanText($(this).find('.form-field-value').val());
+    });
+
+    // Scan schema form inputs
+    $('#schema-form-preview .schema-field-input').each(function() {
+      scanText($(this).val());
+    });
+
+    return { usedVars, varsWithDefaults };
+  }
+
+  // Update variables list to include detected but undefined variables
+  function updateVariablesWithDetected() {
+    const { usedVars, varsWithDefaults } = detectUsedVariables();
+    const $list = $('#variables-list');
+    const $empty = $('#variables-empty');
+
+    $list.find('.variable-item').remove();
+
+    // Get all variables (global + environment + collection)
+    const allVars = getEffectiveVariables();
+
+    let varsToShow = {};
+    let scopeLabel = '';
+
+    switch (currentVarScope) {
+      case 'detected':
+        // Show all detected variables with their effective values
+        usedVars.forEach(name => {
+          varsToShow[name] = allVars[name] || '';
+        });
+        break;
+      case 'global':
+        varsToShow = { ...variables };
+        scopeLabel = 'global';
+        break;
+      case 'environment':
+        if (currentEnvironment && environments[currentEnvironment]) {
+          varsToShow = { ...environments[currentEnvironment] };
+          scopeLabel = 'env';
+        }
+        break;
+      case 'collection':
+        if (currentCollectionId) {
+          const collection = collections.find(c => c.id === currentCollectionId);
+          if (collection && collection.variables) {
+            varsToShow = { ...collection.variables };
+            scopeLabel = 'collection';
+          }
+        }
+        break;
+    }
+
+    const varNames = Object.keys(varsToShow);
+
+    if (varNames.length === 0) {
+      $empty.removeClass('hidden');
+      if (currentVarScope === 'environment' && !currentEnvironment) {
+        $empty.html('<p class="text-slate-500 text-xs">Select an environment first</p>');
+      } else if (currentVarScope === 'collection' && !currentCollectionId) {
+        $empty.html('<p class="text-slate-500 text-xs">Select a collection first</p>');
+      } else if (currentVarScope === 'detected') {
+        $empty.html('<p class="text-slate-500 text-xs">No variables detected</p><p class="text-slate-600 text-xs">Use: <code>${var:name}</code></p>');
+      } else {
+        $empty.html('<p class="text-slate-500 text-xs">No variables defined</p>');
+      }
+      return;
+    }
+
+    $empty.addClass('hidden');
+
+    // Sort: undefined variables (without defaults) first for detected tab, otherwise alphabetical
+    const sortedVars = varNames.sort((a, b) => {
+      if (currentVarScope === 'detected') {
+        const aUndefined = !allVars.hasOwnProperty(a) || allVars[a] === '';
+        const bUndefined = !allVars.hasOwnProperty(b) || allVars[b] === '';
+        const aHasDefault = varsWithDefaults.has(a);
+        const bHasDefault = varsWithDefaults.has(b);
+        const aNeedsAttention = aUndefined && !aHasDefault;
+        const bNeedsAttention = bUndefined && !bHasDefault;
+        if (aNeedsAttention && !bNeedsAttention) return -1;
+        if (!aNeedsAttention && bNeedsAttention) return 1;
+      }
+      return a.localeCompare(b);
+    });
+
+    sortedVars.forEach(function(name) {
+      const value = varsToShow[name] || '';
+      const isUsed = usedVars.has(name);
+      const effectiveValue = allVars[name] || '';
+      const isUndefined = effectiveValue === '';
+      const hasDefault = varsWithDefaults.has(name);
+      // Only needs value if it's used, undefined, AND has no default
+      const needsValue = isUsed && isUndefined && !hasDefault;
+
+      // Determine the source of this variable for detected tab
+      let sourceScope = '';
+      if (currentVarScope === 'detected') {
+        if (currentCollectionId) {
+          const collection = collections.find(c => c.id === currentCollectionId);
+          if (collection && collection.variables && collection.variables.hasOwnProperty(name)) {
+            sourceScope = 'collection';
+          }
+        }
+        if (!sourceScope && currentEnvironment && environments[currentEnvironment] && environments[currentEnvironment].hasOwnProperty(name)) {
+          sourceScope = 'env';
+        }
+        if (!sourceScope && variables.hasOwnProperty(name)) {
+          sourceScope = 'global';
+        }
+      }
+
+      const scopeBadge = currentVarScope === 'detected' && sourceScope ?
+        `<span class="variable-scope ${sourceScope}">${sourceScope}</span>` : '';
+
+      const $item = $(`
+        <div class="variable-item ${needsValue ? 'needs-value' : ''} ${isUsed ? 'is-used' : ''} ${hasDefault && isUndefined ? 'has-default' : ''}" data-var-name="${escapeHtml(name)}" data-var-scope="${currentVarScope === 'detected' ? (sourceScope || 'global') : currentVarScope}">
+          ${scopeBadge}
+          <input type="text" class="variable-name" value="${escapeHtml(name)}" placeholder="name" ${currentVarScope === 'detected' ? 'readonly' : ''}>
+          <input type="text" class="variable-value" value="${escapeHtml(value)}" placeholder="${needsValue ? '⚠ needs value' : (hasDefault && isUndefined ? 'has default' : 'value')}">
+          <button class="variable-delete" title="Delete">
+            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+            </svg>
+          </button>
+        </div>
+      `);
+      $list.append($item);
+    });
+
+    // Auto-expand if there are undefined variables that need values (no default)
+    if (currentVarScope === 'detected') {
+      const hasUndefinedUsed = Array.from(usedVars).some(name => {
+        const isUndefined = !allVars.hasOwnProperty(name) || allVars[name] === '';
+        const hasDefault = varsWithDefaults.has(name);
+        return isUndefined && !hasDefault;
+      });
+      if (hasUndefinedUsed) {
+        $('.variables-section').addClass('expanded');
+      }
+    }
+  }
+
+  // Get effective variables (combining global, environment, and collection)
+  function getEffectiveVariables() {
+    const effective = { ...variables };
+
+    // Override with environment variables
+    if (currentEnvironment && environments[currentEnvironment]) {
+      Object.assign(effective, environments[currentEnvironment]);
+    }
+
+    // Override with collection variables
+    if (currentCollectionId) {
+      const collection = collections.find(c => c.id === currentCollectionId);
+      if (collection && collection.variables) {
+        Object.assign(effective, collection.variables);
+      }
+    }
+
+    return effective;
+  }
+
+  // Debounce function
+  function debounce(func, wait) {
+    let timeout;
+    return function(...args) {
+      clearTimeout(timeout);
+      timeout = setTimeout(() => func.apply(this, args), wait);
+    };
+  }
+
+  // Debounced variable detection
+  const debouncedUpdateVariables = debounce(updateVariablesWithDetected, 300);
+
+  // Listen for input changes to detect variables
+  $(document).on('input', '#url-input, .param-key, .param-value, .header-key, .header-value, #auth-basic-username, #auth-basic-password, #auth-bearer-token, #auth-api-key-name, #auth-api-key-value, #body-json-input, #body-xml-input, #body-raw-input, #body-raw-content-type, .form-field-key, .form-field-value, .schema-field-input', function() {
+    debouncedUpdateVariables();
+  });
+
+  // Interpolation function
+  // Supports: ${var:name} and ${var:name:default}
+  function interpolateVariables(text) {
+    if (!text || typeof text !== 'string') return text;
+
+    // Get effective variables (global + environment + collection)
+    const effectiveVars = getEffectiveVariables();
+
+    // Match ${var:name} or ${var:name:default}
+    // The regex captures: name and optional default value
+    return text.replace(/\$\{var:([a-zA-Z0-9_-]+)(?::([^}]*))?\}/g, function(match, name, defaultValue) {
+      if (effectiveVars.hasOwnProperty(name) && effectiveVars[name] !== '') {
+        return effectiveVars[name];
+      }
+      if (defaultValue !== undefined) {
+        return defaultValue;
+      }
+      // Return the original match if no value and no default
+      return match;
+    });
+  }
+
+  // Interpolate object values (for headers, params, etc.)
+  function interpolateObject(obj) {
+    const result = {};
+    for (const [key, value] of Object.entries(obj)) {
+      const interpolatedKey = interpolateVariables(key);
+      const interpolatedValue = interpolateVariables(value);
+      result[interpolatedKey] = interpolatedValue;
+    }
+    return result;
+  }
+
   // Collection management functions
   function generateId() {
     return Date.now().toString(36) + Math.random().toString(36).substr(2);
@@ -440,6 +1022,9 @@ $(document).ready(function() {
       $('.schema-tab-content').addClass('hidden');
       $('#schema-editor-tab').removeClass('hidden');
     }
+
+    // Trigger variable detection after loading request
+    updateVariablesWithDetected();
   }
 
   function saveRequestFromForm(request) {
@@ -539,6 +1124,9 @@ $(document).ready(function() {
 
     hideResponse();
     hideError();
+
+    // Trigger variable detection after clearing
+    updateVariablesWithDetected();
   }
 
   // Export collections
@@ -1212,13 +1800,18 @@ $(document).ready(function() {
   });
 
   function buildUrl(baseUrl) {
-    const params = getKeyValuePairs('#params-container', 'param');
+    // Interpolate the base URL
+    const interpolatedBaseUrl = interpolateVariables(baseUrl);
+
+    const rawParams = getKeyValuePairs('#params-container', 'param');
+    // Interpolate params
+    const params = interpolateObject(rawParams);
     const authType = $('#auth-type').val();
 
     // Add API key to query if configured
     if (authType === 'api-key' && $('#auth-api-key-location').val() === 'query') {
-      const keyName = $('#auth-api-key-name').val().trim();
-      const keyValue = $('#auth-api-key-value').val().trim();
+      const keyName = interpolateVariables($('#auth-api-key-name').val().trim());
+      const keyValue = interpolateVariables($('#auth-api-key-value').val().trim());
 
       if (keyName && keyValue) {
         params[keyName] = keyValue;
@@ -1226,34 +1819,36 @@ $(document).ready(function() {
     }
 
     if (Object.keys(params).length === 0) {
-      return baseUrl;
+      return interpolatedBaseUrl;
     }
 
     const queryString = Object.entries(params)
       .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
       .join('&');
 
-    return baseUrl.includes('?') ? `${baseUrl}&${queryString}` : `${baseUrl}?${queryString}`;
+    return interpolatedBaseUrl.includes('?') ? `${interpolatedBaseUrl}&${queryString}` : `${interpolatedBaseUrl}?${queryString}`;
   }
 
   function buildHeaders() {
-    const headers = getKeyValuePairs('#headers-container', 'header');
+    const rawHeaders = getKeyValuePairs('#headers-container', 'header');
+    // Interpolate headers
+    const headers = interpolateObject(rawHeaders);
     const authType = $('#auth-type').val();
 
-    // Add auth headers
+    // Add auth headers (with interpolation)
     if (authType === 'basic') {
-      const username = $('#auth-basic-username').val();
-      const password = $('#auth-basic-password').val();
+      const username = interpolateVariables($('#auth-basic-username').val());
+      const password = interpolateVariables($('#auth-basic-password').val());
       headers['Authorization'] = 'Basic ' + btoa(`${username}:${password}`);
     } else if (authType === 'bearer') {
-      const token = $('#auth-bearer-token').val().trim();
+      const token = interpolateVariables($('#auth-bearer-token').val().trim());
 
       if (token) {
         headers['Authorization'] = `Bearer ${token}`;
       }
     } else if (authType === 'api-key' && $('#auth-api-key-location').val() === 'header') {
-      const keyName = $('#auth-api-key-name').val().trim();
-      const keyValue = $('#auth-api-key-value').val().trim();
+      const keyName = interpolateVariables($('#auth-api-key-name').val().trim());
+      const keyValue = interpolateVariables($('#auth-api-key-value').val().trim());
 
       if (keyName && keyValue) {
         headers[keyName] = keyValue;
@@ -1272,26 +1867,32 @@ $(document).ready(function() {
         const jsonText = $('#body-json-input').val().trim();
 
         if (jsonText) {
+          // Interpolate variables in JSON
+          const interpolatedJson = interpolateVariables(jsonText);
           try {
-            JSON.parse(jsonText);
-            body = jsonText;
+            JSON.parse(interpolatedJson);
+            body = interpolatedJson;
             contentType = 'application/json';
           } catch (e) {
-            throw new Error('Invalid JSON in request body');
+            throw new Error('Invalid JSON in request body (after variable interpolation)');
           }
         }
         break;
 
       case 'xml':
-        body = $('#body-xml-input').val().trim();
+        const xmlText = $('#body-xml-input').val().trim();
 
-        if (body) {
+        if (xmlText) {
+          // Interpolate variables in XML
+          body = interpolateVariables(xmlText);
           contentType = 'application/xml';
         }
         break;
 
       case 'form':
-        const formData = getKeyValuePairs('#form-fields-container', 'form-field');
+        const rawFormData = getKeyValuePairs('#form-fields-container', 'form-field');
+        // Interpolate form data
+        const formData = interpolateObject(rawFormData);
 
         if (Object.keys(formData).length > 0) {
           body = Object.entries(formData)
@@ -1302,13 +1903,25 @@ $(document).ready(function() {
         break;
 
       case 'raw':
-        body = $('#body-raw-input').val();
-        contentType = $('#body-raw-content-type').val().trim() || 'text/plain';
+        // Interpolate raw body
+        body = interpolateVariables($('#body-raw-input').val());
+        contentType = interpolateVariables($('#body-raw-content-type').val().trim()) || 'text/plain';
         break;
 
       case 'schema':
         const schemaValues = getSchemaFormValues();
-        body = JSON.stringify(schemaValues);
+        // Interpolate string values in schema form
+        const interpolatedSchemaValues = {};
+        for (const [key, value] of Object.entries(schemaValues)) {
+          if (typeof value === 'string') {
+            interpolatedSchemaValues[key] = interpolateVariables(value);
+          } else if (Array.isArray(value)) {
+            interpolatedSchemaValues[key] = value.map(v => typeof v === 'string' ? interpolateVariables(v) : v);
+          } else {
+            interpolatedSchemaValues[key] = value;
+          }
+        }
+        body = JSON.stringify(interpolatedSchemaValues);
         contentType = 'application/json';
         break;
     }
