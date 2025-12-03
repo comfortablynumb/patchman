@@ -4,22 +4,65 @@ $(document).ready(function() {
   let collections = [];
   let currentRequestId = null;
   let currentCollectionId = null;
+  let requestHistory = [];
+  const MAX_HISTORY_ITEMS = 50;
+  let originalRequestState = null; // Store original state to detect changes
+  let unsavedRequestData = {}; // Store unsaved form state per request ID: { requestId: formState }
 
-  // Load collections from storage
+  // Load collections and history from storage
   loadCollections();
+  loadHistory();
+
+  // Warn before closing tab if there are unsaved changes
+  $(window).on('beforeunload', function(e) {
+    // Check current form for unsaved changes
+    if (hasUnsavedChanges()) {
+      e.preventDefault();
+      return 'You have unsaved changes. Are you sure you want to leave?';
+    }
+
+    // Check stored unsaved data
+    if (Object.keys(unsavedRequestData).length > 0) {
+      e.preventDefault();
+      return 'You have unsaved changes. Are you sure you want to leave?';
+    }
+  });
+
+  // Sidebar section collapse/expand
+  $(document).on('click', '.sidebar-section-header', function(e) {
+    // Don't toggle if clicking on action buttons
+    if ($(e.target).closest('.sidebar-section-actions').length) return;
+
+    const $section = $(this).closest('.sidebar-section');
+    $section.toggleClass('expanded');
+  });
 
   // Variables management
-  let variables = {};  // Global variables
-  let environments = {};  // Environment-specific variables { envName: { varName: value } }
-  let currentEnvironment = '';  // Currently selected environment
+  // Structure: environments = { envName: { varName: value } }
+  // Collection variables are stored in collection.variables
+  // Collection variables override environment (global) variables
+  const DEFAULT_ENVIRONMENT = 'Default Environment';
+  let environments = {};
+  let currentEnvironment = DEFAULT_ENVIRONMENT;
 
   loadVariables();
 
   function loadVariables() {
-    chrome.storage.local.get(['patchman_variables', 'patchman_environments', 'patchman_current_env'], function(result) {
-      variables = result.patchman_variables || {};
+    chrome.storage.local.get(['patchman_environments', 'patchman_current_env'], function(result) {
       environments = result.patchman_environments || {};
-      currentEnvironment = result.patchman_current_env || '';
+
+      // Ensure Default Environment always exists
+      if (!environments[DEFAULT_ENVIRONMENT]) {
+        environments[DEFAULT_ENVIRONMENT] = {};
+      }
+
+      currentEnvironment = result.patchman_current_env || DEFAULT_ENVIRONMENT;
+
+      // If current environment doesn't exist, fall back to default
+      if (!environments[currentEnvironment]) {
+        currentEnvironment = DEFAULT_ENVIRONMENT;
+      }
+
       renderEnvironments();
       renderVariables();
     });
@@ -27,7 +70,6 @@ $(document).ready(function() {
 
   function saveVariables() {
     chrome.storage.local.set({
-      patchman_variables: variables,
       patchman_environments: environments,
       patchman_current_env: currentEnvironment
     }, function() {
@@ -43,27 +85,26 @@ $(document).ready(function() {
 
   function renderEnvironments() {
     const $select = $('#environment-select');
-    const currentVal = currentEnvironment;
 
-    $select.find('option:not([value=""])').remove();
+    $select.empty();
 
-    Object.keys(environments).sort().forEach(function(envName) {
+    // Sort environments but keep Default Environment first
+    const envNames = Object.keys(environments).sort((a, b) => {
+      if (a === DEFAULT_ENVIRONMENT) return -1;
+      if (b === DEFAULT_ENVIRONMENT) return 1;
+      return a.localeCompare(b);
+    });
+
+    envNames.forEach(function(envName) {
       $select.append(`<option value="${escapeHtml(envName)}">${escapeHtml(envName)}</option>`);
     });
 
-    $select.val(currentVal);
+    $select.val(currentEnvironment);
   }
 
-  // Current variable scope tab
-  let currentVarScope = 'detected';
-
-  // Variable scope tab switching
-  $('.variables-tab').on('click', function() {
-    currentVarScope = $(this).data('var-scope');
-    $('.variables-tab').removeClass('active');
-    $(this).addClass('active');
-    updateVariablesWithDetected();
-  });
+  // Current variable scope tab (only 'global' and 'collection' now)
+  let currentVarScope = 'global';
+  let $variablesModal = null;
 
   // Environment selection
   $('#environment-select').on('change', function() {
@@ -71,27 +112,39 @@ $(document).ready(function() {
     saveVariables();
   });
 
-  // Manage environments
-  $('#manage-environments-btn').on('click', function() {
-    showEnvironmentManager();
+  // Open variables modal
+  $('#open-variables-btn').on('click', function() {
+    showVariablesModal();
   });
 
   function showEnvironmentManager() {
-    const envList = Object.keys(environments).map(name => `
-      <div class="env-manager-item" data-env-name="${escapeHtml(name)}">
-        <span class="env-manager-name">${escapeHtml(name)}</span>
-        <button class="env-manager-edit" title="Edit">
-          <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
-          </svg>
-        </button>
-        <button class="env-manager-delete" title="Delete">
-          <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
-          </svg>
-        </button>
-      </div>
-    `).join('');
+    // Sort environments with Default Environment first
+    const envNames = Object.keys(environments).sort((a, b) => {
+      if (a === DEFAULT_ENVIRONMENT) return -1;
+      if (b === DEFAULT_ENVIRONMENT) return 1;
+      return a.localeCompare(b);
+    });
+
+    const envList = envNames.map(name => {
+      const isDefault = name === DEFAULT_ENVIRONMENT;
+      return `
+        <div class="env-manager-item" data-env-name="${escapeHtml(name)}">
+          <span class="env-manager-name">${escapeHtml(name)}${isDefault ? ' <span class="text-slate-500 text-xs">(default)</span>' : ''}</span>
+          <button class="env-manager-edit" title="Edit Variables">
+            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
+            </svg>
+          </button>
+          ${isDefault ? '' : `
+            <button class="env-manager-delete" title="Delete">
+              <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+              </svg>
+            </button>
+          `}
+        </div>
+      `;
+    }).join('');
 
     const $modal = $(`
       <div class="modal-overlay">
@@ -100,9 +153,13 @@ $(document).ready(function() {
           <div class="env-manager-list">
             ${envList || '<p class="text-slate-500 text-sm text-center py-4">No environments yet</p>'}
           </div>
-          <div class="env-manager-add">
-            <input type="text" class="modal-input" id="new-env-name" placeholder="New environment name..." style="margin-bottom: 0.5rem;">
-            <button class="modal-btn modal-btn-primary" id="add-env-btn" style="width: 100%;">Add Environment</button>
+          <div class="env-create-form">
+            <input type="text" class="modal-input" id="new-env-name" placeholder="New environment name..." style="margin-bottom: 0;">
+            <button class="modal-btn modal-btn-primary" id="add-env-btn">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+              </svg>
+            </button>
           </div>
           <div class="modal-actions" style="margin-top: 1rem;">
             <button class="modal-btn modal-btn-secondary close-modal-btn">Close</button>
@@ -136,18 +193,25 @@ $(document).ready(function() {
       const envName = $(this).closest('.env-manager-item').data('env-name');
       $modal.remove();
       currentEnvironment = envName;
-      currentVarScope = 'environment';
-      $('.variables-tab').removeClass('active');
-      $('.variables-tab[data-var-scope="environment"]').addClass('active');
+      $('#environment-select').val(envName);
+      currentVarScope = 'global';
       saveVariables();
+      showVariablesModal();
     });
 
     $modal.on('click', '.env-manager-delete', function() {
       const envName = $(this).closest('.env-manager-item').data('env-name');
+
+      // Prevent deleting default environment
+      if (envName === DEFAULT_ENVIRONMENT) {
+        return;
+      }
+
       if (confirm(`Delete environment "${envName}"?`)) {
         delete environments[envName];
         if (currentEnvironment === envName) {
-          currentEnvironment = '';
+          currentEnvironment = DEFAULT_ENVIRONMENT;
+          $('#environment-select').val(DEFAULT_ENVIRONMENT);
         }
         saveVariables();
         $modal.remove();
@@ -156,37 +220,261 @@ $(document).ready(function() {
     });
   }
 
-  // Add new variable
-  $('#add-variable-btn').on('click', function(e) {
-    e.stopPropagation();
+  function showVariablesModal() {
+    // Close existing modal if open
+    if ($variablesModal) {
+      $variablesModal.remove();
+    }
 
-    // Generate unique name
+    // Sort environments with Default first
+    const envNames = Object.keys(environments).sort((a, b) => {
+      if (a === DEFAULT_ENVIRONMENT) return -1;
+      if (b === DEFAULT_ENVIRONMENT) return 1;
+      return a.localeCompare(b);
+    });
+
+    const envOptions = envNames.map(name =>
+      `<option value="${escapeHtml(name)}" ${name === currentEnvironment ? 'selected' : ''}>${escapeHtml(name)}</option>`
+    ).join('');
+
+    $variablesModal = $(`
+      <div class="modal-overlay">
+        <div class="modal variables-modal">
+          <div class="variables-modal-header">
+            <h3 class="variables-modal-title">Variables</h3>
+            <button class="variables-modal-close">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+              </svg>
+            </button>
+          </div>
+
+          <div class="variables-modal-env">
+            <select id="modal-env-select" class="environment-select" style="flex: 1;">
+              ${envOptions}
+            </select>
+            <button class="variables-modal-env-manage" title="Manage Environments">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+              </svg>
+            </button>
+          </div>
+
+          <div class="variables-modal-tabs">
+            <button class="variables-modal-tab ${currentVarScope === 'global' ? 'active' : ''}" data-var-scope="global">Global</button>
+            <button class="variables-modal-tab ${currentVarScope === 'collection' ? 'active' : ''}" data-var-scope="collection">Collection</button>
+          </div>
+
+          <div class="variables-modal-content">
+            <div class="variables-modal-list" id="modal-variables-list"></div>
+          </div>
+
+          <div class="variables-modal-footer">
+            <button class="variables-modal-add" id="modal-add-variable-btn">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+              </svg>
+              Add Variable
+            </button>
+            <button class="variables-modal-done">Done</button>
+          </div>
+        </div>
+      </div>
+    `);
+
+    $('body').append($variablesModal);
+    renderModalVariables();
+
+    // Close modal handlers
+    $variablesModal.find('.variables-modal-close, .variables-modal-done').on('click', function() {
+      $variablesModal.remove();
+      $variablesModal = null;
+    });
+
+    $variablesModal.on('click', function(e) {
+      if ($(e.target).hasClass('modal-overlay')) {
+        $variablesModal.remove();
+        $variablesModal = null;
+      }
+    });
+
+    // Environment select in modal
+    $variablesModal.find('#modal-env-select').on('change', function() {
+      currentEnvironment = $(this).val();
+      $('#environment-select').val(currentEnvironment);
+      saveVariables();
+      renderModalVariables();
+    });
+
+    // Manage environments button
+    $variablesModal.find('.variables-modal-env-manage').on('click', function() {
+      $variablesModal.remove();
+      $variablesModal = null;
+      showEnvironmentManager();
+    });
+
+    // Tab switching
+    $variablesModal.on('click', '.variables-modal-tab', function() {
+      currentVarScope = $(this).data('var-scope');
+      $variablesModal.find('.variables-modal-tab').removeClass('active');
+      $(this).addClass('active');
+      renderModalVariables();
+    });
+
+    // Add variable button
+    $variablesModal.find('#modal-add-variable-btn').on('click', function() {
+      addNewVariableInModal();
+    });
+
+    // Variable name change
+    $variablesModal.on('blur', '.var-modal-name', function() {
+      if ($(this).prop('readonly')) return;
+
+      const $item = $(this).closest('.var-modal-item');
+      const oldName = $item.data('var-name');
+      const scope = $item.data('var-scope') || currentVarScope;
+      const newName = $(this).val().trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+
+      if (!newName) {
+        $(this).val(oldName);
+        return;
+      }
+
+      if (newName !== oldName) {
+        const targetVars = getVariablesForScopeByName(scope);
+        if (targetVars.hasOwnProperty(newName)) {
+          $(this).val(oldName);
+          return;
+        }
+
+        const value = targetVars[oldName];
+        delete targetVars[oldName];
+        targetVars[newName] = value;
+        $item.data('var-name', newName);
+        saveVariablesForScope(scope);
+      }
+    });
+
+    // Variable value change
+    $variablesModal.on('blur', '.var-modal-value', function() {
+      const $item = $(this).closest('.var-modal-item');
+      const name = $item.data('var-name');
+      const scope = $item.data('var-scope') || currentVarScope;
+      const value = $(this).val();
+
+      const targetVars = getVariablesForScopeByName(scope);
+      targetVars[name] = value;
+      saveVariablesForScope(scope);
+      updateVariablesBadge();
+    });
+
+    // Delete variable
+    $variablesModal.on('click', '.var-modal-delete', function() {
+      const $item = $(this).closest('.var-modal-item');
+      const name = $item.data('var-name');
+      const scope = $item.data('var-scope') || currentVarScope;
+
+      const targetVars = getVariablesForScopeByName(scope);
+      delete targetVars[name];
+      saveVariablesForScope(scope);
+      renderModalVariables();
+    });
+  }
+
+  function addNewVariableInModal() {
     let baseName = 'new_var';
     let name = baseName;
     let counter = 1;
 
-    // Check based on current scope
     const targetVars = getVariablesForScope(currentVarScope);
     while (targetVars.hasOwnProperty(name)) {
       name = `${baseName}_${counter}`;
       counter++;
     }
 
-    // Add to appropriate scope
     addVariableToScope(name, '', currentVarScope);
+    renderModalVariables();
 
-    // Focus on the new variable name input
     setTimeout(function() {
-      const $newItem = $(`.variable-item[data-var-name="${name}"]`);
-      $newItem.find('.variable-name').focus().select();
+      const $newItem = $variablesModal.find(`.var-modal-item[data-var-name="${name}"]`);
+      $newItem.find('.var-modal-name').focus().select();
     }, 50);
-  });
+  }
+
+  function renderModalVariables() {
+    if (!$variablesModal) return;
+
+    const { usedVars, varsWithDefaults } = detectUsedVariables();
+    const $list = $variablesModal.find('#modal-variables-list');
+    $list.empty();
+
+    const allVars = getEffectiveVariables();
+    let varsToShow = {};
+
+    switch (currentVarScope) {
+      case 'global':
+        // Global variables are stored in the current environment
+        if (currentEnvironment && environments[currentEnvironment]) {
+          varsToShow = { ...environments[currentEnvironment] };
+        }
+        break;
+      case 'collection':
+        if (currentCollectionId) {
+          const collection = collections.find(c => c.id === currentCollectionId);
+          if (collection && collection.variables) {
+            varsToShow = { ...collection.variables };
+          }
+        }
+        break;
+    }
+
+    const varNames = Object.keys(varsToShow);
+
+    if (varNames.length === 0) {
+      let emptyMsg = 'No variables defined';
+      if (currentVarScope === 'collection' && !currentCollectionId) {
+        emptyMsg = 'Select a collection first';
+      }
+
+      $list.html(`
+        <div class="variables-modal-empty">
+          <p>${emptyMsg}</p>
+          <p class="text-slate-600 text-xs mt-2">Use: <code>\${var:name}</code></p>
+        </div>
+      `);
+      return;
+    }
+
+    const sortedVars = varNames.sort((a, b) => a.localeCompare(b));
+
+    sortedVars.forEach(function(name) {
+      const value = varsToShow[name] || '';
+      const isUsed = usedVars.has(name);
+      const effectiveValue = allVars[name] || '';
+      const isUndefined = effectiveValue === '';
+      const hasDefault = varsWithDefaults.has(name);
+      const needsValue = isUsed && isUndefined && !hasDefault;
+
+      const $item = $(`
+        <div class="var-modal-item ${needsValue ? 'needs-value' : ''} ${isUsed ? 'is-used' : ''}" data-var-name="${escapeHtml(name)}" data-var-scope="${currentVarScope}">
+          <input type="text" class="var-modal-name" value="${escapeHtml(name)}" placeholder="name">
+          <input type="text" class="var-modal-value" value="${escapeHtml(value)}" placeholder="${needsValue ? '⚠ needs value' : 'value'}">
+          <button class="var-modal-delete" title="Delete">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+            </svg>
+          </button>
+        </div>
+      `);
+      $list.append($item);
+    });
+  }
 
   function getVariablesForScope(scope) {
     switch (scope) {
       case 'global':
-        return variables;
-      case 'environment':
+        // Global variables are stored in the current environment
         if (currentEnvironment && environments[currentEnvironment]) {
           return environments[currentEnvironment];
         }
@@ -208,17 +496,12 @@ $(document).ready(function() {
   function addVariableToScope(name, value, scope) {
     switch (scope) {
       case 'global':
-      case 'detected':
-        variables[name] = value;
-        break;
-      case 'environment':
+        // Global variables go to the current environment
         if (currentEnvironment) {
           if (!environments[currentEnvironment]) environments[currentEnvironment] = {};
           environments[currentEnvironment][name] = value;
-        } else {
-          // No environment selected, add to global
-          variables[name] = value;
         }
+        saveVariables();
         break;
       case 'collection':
         if (currentCollectionId) {
@@ -231,76 +514,29 @@ $(document).ready(function() {
             return;
           }
         }
-        // Fallback to global
-        variables[name] = value;
+        // Fallback to global/environment
+        if (currentEnvironment) {
+          if (!environments[currentEnvironment]) environments[currentEnvironment] = {};
+          environments[currentEnvironment][name] = value;
+        }
+        saveVariables();
         break;
     }
-    saveVariables();
   }
-
-  // Update variable name
-  $(document).on('blur', '.variable-name', function() {
-    if ($(this).prop('readonly')) return;
-
-    const $item = $(this).closest('.variable-item');
-    const oldName = $item.data('var-name');
-    const scope = $item.data('var-scope') || currentVarScope;
-    const newName = $(this).val().trim().replace(/[^a-zA-Z0-9_-]/g, '_');
-
-    if (!newName) {
-      $(this).val(oldName);
-      return;
-    }
-
-    if (newName !== oldName) {
-      const targetVars = getVariablesForScopeByName(scope);
-      if (targetVars.hasOwnProperty(newName)) {
-        $(this).val(oldName);
-        showError(`Variable "${newName}" already exists`);
-        return;
-      }
-
-      const value = targetVars[oldName];
-      delete targetVars[oldName];
-      targetVars[newName] = value;
-      $item.data('var-name', newName);
-      saveVariablesForScope(scope);
-    }
-  });
-
-  // Update variable value
-  $(document).on('blur', '.variable-value', function() {
-    const $item = $(this).closest('.variable-item');
-    const name = $item.data('var-name');
-    const scope = $item.data('var-scope') || currentVarScope;
-    const value = $(this).val();
-
-    const targetVars = getVariablesForScopeByName(scope);
-    targetVars[name] = value;
-    saveVariablesForScope(scope);
-  });
-
-  // Delete variable
-  $(document).on('click', '.variable-delete', function() {
-    const $item = $(this).closest('.variable-item');
-    const name = $item.data('var-name');
-    const scope = $item.data('var-scope') || currentVarScope;
-
-    const targetVars = getVariablesForScopeByName(scope);
-    delete targetVars[name];
-    saveVariablesForScope(scope);
-  });
 
   function getVariablesForScopeByName(scope) {
     switch (scope) {
       case 'global':
-        return variables;
-      case 'env':
-      case 'environment':
+        // Global variables are stored in the current environment
         if (currentEnvironment && environments[currentEnvironment]) {
           return environments[currentEnvironment];
         }
-        return variables; // Fallback
+        // Ensure environment exists
+        if (currentEnvironment) {
+          environments[currentEnvironment] = {};
+          return environments[currentEnvironment];
+        }
+        return {};
       case 'collection':
         if (currentCollectionId) {
           const collection = collections.find(c => c.id === currentCollectionId);
@@ -309,9 +545,10 @@ $(document).ready(function() {
             return collection.variables;
           }
         }
-        return variables; // Fallback
+        // Fallback to global
+        return getVariablesForScopeByName('global');
       default:
-        return variables;
+        return getVariablesForScopeByName('global');
     }
   }
 
@@ -364,7 +601,10 @@ $(document).ready(function() {
     const authFields = [
       '#auth-basic-username', '#auth-basic-password',
       '#auth-bearer-token',
-      '#auth-api-key-name', '#auth-api-key-value'
+      '#auth-api-key-name', '#auth-api-key-value',
+      '#auth-oauth2-token-url', '#auth-oauth2-auth-url', '#auth-oauth2-client-id',
+      '#auth-oauth2-client-secret', '#auth-oauth2-redirect-uri', '#auth-oauth2-scope',
+      '#auth-oauth2-username', '#auth-oauth2-password'
     ];
     authFields.forEach(selector => scanText($(selector).val()));
 
@@ -388,143 +628,69 @@ $(document).ready(function() {
     return { usedVars, varsWithDefaults };
   }
 
-  // Update variables list to include detected but undefined variables
+  // Update variables badge and modal if open
+  // Also auto-adds detected variables to current environment's global scope
   function updateVariablesWithDetected() {
-    const { usedVars, varsWithDefaults } = detectUsedVariables();
-    const $list = $('#variables-list');
-    const $empty = $('#variables-empty');
-
-    $list.find('.variable-item').remove();
-
-    // Get all variables (global + environment + collection)
+    const { usedVars } = detectUsedVariables();
     const allVars = getEffectiveVariables();
 
-    let varsToShow = {};
-    let scopeLabel = '';
-
-    switch (currentVarScope) {
-      case 'detected':
-        // Show all detected variables with their effective values
-        usedVars.forEach(name => {
-          varsToShow[name] = allVars[name] || '';
-        });
-        break;
-      case 'global':
-        varsToShow = { ...variables };
-        scopeLabel = 'global';
-        break;
-      case 'environment':
-        if (currentEnvironment && environments[currentEnvironment]) {
-          varsToShow = { ...environments[currentEnvironment] };
-          scopeLabel = 'env';
+    // Auto-add any detected variables that don't exist yet to the current environment
+    let addedNew = false;
+    if (currentEnvironment && environments[currentEnvironment]) {
+      usedVars.forEach(name => {
+        if (!allVars.hasOwnProperty(name)) {
+          environments[currentEnvironment][name] = '';
+          addedNew = true;
         }
-        break;
-      case 'collection':
-        if (currentCollectionId) {
-          const collection = collections.find(c => c.id === currentCollectionId);
-          if (collection && collection.variables) {
-            varsToShow = { ...collection.variables };
-            scopeLabel = 'collection';
-          }
-        }
-        break;
-    }
-
-    const varNames = Object.keys(varsToShow);
-
-    if (varNames.length === 0) {
-      $empty.removeClass('hidden');
-      if (currentVarScope === 'environment' && !currentEnvironment) {
-        $empty.html('<p class="text-slate-500 text-xs">Select an environment first</p>');
-      } else if (currentVarScope === 'collection' && !currentCollectionId) {
-        $empty.html('<p class="text-slate-500 text-xs">Select a collection first</p>');
-      } else if (currentVarScope === 'detected') {
-        $empty.html('<p class="text-slate-500 text-xs">No variables detected</p><p class="text-slate-600 text-xs">Use: <code>${var:name}</code></p>');
-      } else {
-        $empty.html('<p class="text-slate-500 text-xs">No variables defined</p>');
-      }
-      return;
-    }
-
-    $empty.addClass('hidden');
-
-    // Sort: undefined variables (without defaults) first for detected tab, otherwise alphabetical
-    const sortedVars = varNames.sort((a, b) => {
-      if (currentVarScope === 'detected') {
-        const aUndefined = !allVars.hasOwnProperty(a) || allVars[a] === '';
-        const bUndefined = !allVars.hasOwnProperty(b) || allVars[b] === '';
-        const aHasDefault = varsWithDefaults.has(a);
-        const bHasDefault = varsWithDefaults.has(b);
-        const aNeedsAttention = aUndefined && !aHasDefault;
-        const bNeedsAttention = bUndefined && !bHasDefault;
-        if (aNeedsAttention && !bNeedsAttention) return -1;
-        if (!aNeedsAttention && bNeedsAttention) return 1;
-      }
-      return a.localeCompare(b);
-    });
-
-    sortedVars.forEach(function(name) {
-      const value = varsToShow[name] || '';
-      const isUsed = usedVars.has(name);
-      const effectiveValue = allVars[name] || '';
-      const isUndefined = effectiveValue === '';
-      const hasDefault = varsWithDefaults.has(name);
-      // Only needs value if it's used, undefined, AND has no default
-      const needsValue = isUsed && isUndefined && !hasDefault;
-
-      // Determine the source of this variable for detected tab
-      let sourceScope = '';
-      if (currentVarScope === 'detected') {
-        if (currentCollectionId) {
-          const collection = collections.find(c => c.id === currentCollectionId);
-          if (collection && collection.variables && collection.variables.hasOwnProperty(name)) {
-            sourceScope = 'collection';
-          }
-        }
-        if (!sourceScope && currentEnvironment && environments[currentEnvironment] && environments[currentEnvironment].hasOwnProperty(name)) {
-          sourceScope = 'env';
-        }
-        if (!sourceScope && variables.hasOwnProperty(name)) {
-          sourceScope = 'global';
-        }
-      }
-
-      const scopeBadge = currentVarScope === 'detected' && sourceScope ?
-        `<span class="variable-scope ${sourceScope}">${sourceScope}</span>` : '';
-
-      const $item = $(`
-        <div class="variable-item ${needsValue ? 'needs-value' : ''} ${isUsed ? 'is-used' : ''} ${hasDefault && isUndefined ? 'has-default' : ''}" data-var-name="${escapeHtml(name)}" data-var-scope="${currentVarScope === 'detected' ? (sourceScope || 'global') : currentVarScope}">
-          ${scopeBadge}
-          <input type="text" class="variable-name" value="${escapeHtml(name)}" placeholder="name" ${currentVarScope === 'detected' ? 'readonly' : ''}>
-          <input type="text" class="variable-value" value="${escapeHtml(value)}" placeholder="${needsValue ? '⚠ needs value' : (hasDefault && isUndefined ? 'has default' : 'value')}">
-          <button class="variable-delete" title="Delete">
-            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
-            </svg>
-          </button>
-        </div>
-      `);
-      $list.append($item);
-    });
-
-    // Auto-expand if there are undefined variables that need values (no default)
-    if (currentVarScope === 'detected') {
-      const hasUndefinedUsed = Array.from(usedVars).some(name => {
-        const isUndefined = !allVars.hasOwnProperty(name) || allVars[name] === '';
-        const hasDefault = varsWithDefaults.has(name);
-        return isUndefined && !hasDefault;
       });
-      if (hasUndefinedUsed) {
-        $('.variables-section').addClass('expanded');
+
+      if (addedNew) {
+        saveVariables();
       }
+    }
+
+    updateVariablesBadge();
+
+    // Update modal if it's open
+    if ($variablesModal) {
+      renderModalVariables();
     }
   }
 
-  // Get effective variables (combining global, environment, and collection)
-  function getEffectiveVariables() {
-    const effective = { ...variables };
+  // Get list of missing variables (used but have no value and no default)
+  function getMissingVariables() {
+    const { usedVars, varsWithDefaults } = detectUsedVariables();
+    const allVars = getEffectiveVariables();
+    const missing = [];
 
-    // Override with environment variables
+    usedVars.forEach(name => {
+      const isUndefined = !allVars.hasOwnProperty(name) || allVars[name] === '';
+      const hasDefault = varsWithDefaults.has(name);
+      if (isUndefined && !hasDefault) {
+        missing.push(name);
+      }
+    });
+
+    return missing;
+  }
+
+  // Update the badge showing count of missing variables
+  function updateVariablesBadge() {
+    const missing = getMissingVariables();
+
+    const $badge = $('#variables-badge');
+    if (missing.length > 0) {
+      $badge.text(missing.length).removeClass('hidden');
+    } else {
+      $badge.addClass('hidden');
+    }
+  }
+
+  // Get effective variables (environment global + collection override)
+  function getEffectiveVariables() {
+    const effective = {};
+
+    // Start with environment (global) variables
     if (currentEnvironment && environments[currentEnvironment]) {
       Object.assign(effective, environments[currentEnvironment]);
     }
@@ -553,7 +719,7 @@ $(document).ready(function() {
   const debouncedUpdateVariables = debounce(updateVariablesWithDetected, 300);
 
   // Listen for input changes to detect variables
-  $(document).on('input', '#url-input, .param-key, .param-value, .header-key, .header-value, #auth-basic-username, #auth-basic-password, #auth-bearer-token, #auth-api-key-name, #auth-api-key-value, #body-json-input, #body-xml-input, #body-raw-input, #body-raw-content-type, .form-field-key, .form-field-value, .schema-field-input', function() {
+  $(document).on('input', '#url-input, .param-key, .param-value, .header-key, .header-value, #auth-basic-username, #auth-basic-password, #auth-bearer-token, #auth-api-key-name, #auth-api-key-value, #auth-oauth2-token-url, #auth-oauth2-auth-url, #auth-oauth2-client-id, #auth-oauth2-client-secret, #auth-oauth2-redirect-uri, #auth-oauth2-scope, #auth-oauth2-username, #auth-oauth2-password, #body-json-input, #body-xml-input, #body-raw-input, #body-raw-content-type, .form-field-key, .form-field-value, .schema-field-input', function() {
     debouncedUpdateVariables();
   });
 
@@ -622,9 +788,10 @@ $(document).ready(function() {
     $tree.find('.collection-item').remove();
 
     collections.forEach(function(collection) {
+      const isActiveCollection = collection.id === currentCollectionId;
       const $item = $(`
         <div class="collection-item ${collection.expanded ? 'expanded' : ''}" data-collection-id="${collection.id}">
-          <div class="collection-header">
+          <div class="collection-header ${isActiveCollection ? 'active' : ''}">
             <svg class="collection-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
             </svg>
@@ -772,7 +939,7 @@ $(document).ready(function() {
     }, 'Create');
   });
 
-  // Toggle collection expand/collapse
+  // Toggle collection expand/collapse and select collection
   $(document).on('click', '.collection-header', function(e) {
     if ($(e.target).closest('.collection-actions').length) return;
 
@@ -783,6 +950,20 @@ $(document).ready(function() {
     if (collection) {
       collection.expanded = !collection.expanded;
       $item.toggleClass('expanded');
+
+      // Select this collection (allows saving new requests to it)
+      currentCollectionId = collectionId;
+
+      // Update visual selection
+      $('.collection-header').removeClass('active');
+      $(this).addClass('active');
+
+      // Show request name bar so user can set a name for new requests
+      $('#request-name-bar').removeClass('hidden');
+
+      // Update variables for the selected collection
+      updateVariablesWithDetected();
+
       saveCollections();
     }
   });
@@ -856,6 +1037,9 @@ $(document).ready(function() {
 
     if (collection) {
       showModal('New Request', '', function(name) {
+        // Store unsaved data for current request before creating new one
+        storeUnsavedDataForCurrentRequest();
+
         const request = {
           id: generateId(),
           name: name,
@@ -889,11 +1073,18 @@ $(document).ready(function() {
     if (collection) {
       const request = collection.requests.find(r => r.id === requestId);
       if (request) {
+        // Store unsaved data for current request before switching
+        storeUnsavedDataForCurrentRequest();
+
         currentCollectionId = collectionId;
         currentRequestId = requestId;
         loadRequestIntoForm(request);
         $('.request-item').removeClass('active');
         $item.addClass('active');
+
+        // Mark collection header as active too
+        $('.collection-header').removeClass('active');
+        $collection.find('.collection-header').addClass('active');
       }
     }
   });
@@ -915,6 +1106,8 @@ $(document).ready(function() {
           `Are you sure you want to delete "${escapeHtml(request.name)}"?`,
           function() {
             collection.requests = collection.requests.filter(r => r.id !== requestId);
+            // Clean up any unsaved data for this request
+            delete unsavedRequestData[requestId];
             if (currentRequestId === requestId) {
               currentRequestId = null;
               clearRequestForm();
@@ -928,31 +1121,310 @@ $(document).ready(function() {
 
   // Save request button
   $('#save-request-btn').on('click', function() {
-    if (!currentCollectionId || !currentRequestId) return;
+    // If no collection is selected, show a message
+    if (!currentCollectionId) {
+      showInfoModal(
+        'Select a Collection',
+        'To save this request, please first select a collection from the sidebar or create a new one.'
+      );
+      return;
+    }
 
     const collection = collections.find(c => c.id === currentCollectionId);
     if (!collection) return;
+
+    // If no current request (new request), create a new one
+    if (!currentRequestId) {
+      // Get name from the form, or use a default
+      const requestName = $('#request-name').val().trim() || 'Untitled Request';
+
+      const request = {
+        id: generateId(),
+        name: requestName,
+        method: $('#method-select').val(),
+        url: $('#url-input').val().trim(),
+        params: [],
+        headers: [],
+        auth: { type: 'none' },
+        body: { type: 'none', content: '' }
+      };
+      saveRequestFromForm(request);
+      collection.requests.push(request);
+      collection.expanded = true;
+      currentRequestId = request.id;
+      $('#request-name-bar').removeClass('hidden');
+      $('#request-name').val(request.name);
+      saveCollections();
+      clearUnsavedDataForRequest(request.id);
+      storeOriginalState(); // Clear dirty state
+      return;
+    }
 
     const request = collection.requests.find(r => r.id === currentRequestId);
     if (!request) return;
 
     saveRequestFromForm(request);
     saveCollections();
+    clearUnsavedDataForRequest(currentRequestId);
+    storeOriginalState(); // Clear dirty state
+  });
+
+  function showInfoModal(title, message) {
+    const $modal = $(`
+      <div class="modal-overlay">
+        <div class="modal">
+          <h3 class="modal-title">${title}</h3>
+          <p class="text-slate-400 text-sm mb-4">${message}</p>
+          <div class="modal-actions">
+            <button class="modal-btn modal-btn-primary ok-btn">OK</button>
+          </div>
+        </div>
+      </div>
+    `);
+
+    $('body').append($modal);
+
+    $modal.find('.ok-btn').on('click', function() {
+      $modal.remove();
+    });
+
+    $modal.on('click', function(e) {
+      if ($(e.target).hasClass('modal-overlay')) {
+        $modal.remove();
+      }
+    });
+  }
+
+  // Get current form state for change tracking
+  function getCurrentFormState() {
+    const state = {
+      name: $('#request-name').val() || '',
+      method: $('#method-select').val() || 'GET',
+      url: $('#url-input').val() || '',
+      params: [],
+      headers: [],
+      auth: { type: $('#auth-type').val() || 'none' },
+      body: { type: selectedBodyType }
+    };
+
+    // Get params
+    $('#params-container .param-row').each(function() {
+      const key = $(this).find('.param-key').val() || '';
+      const value = $(this).find('.param-value').val() || '';
+      if (key || value) {
+        state.params.push({ key, value });
+      }
+    });
+
+    // Get headers
+    $('#headers-container .header-row').each(function() {
+      const key = $(this).find('.header-key').val() || '';
+      const value = $(this).find('.header-value').val() || '';
+      if (key || value) {
+        state.headers.push({ key, value });
+      }
+    });
+
+    // Get auth details
+    if (state.auth.type === 'basic') {
+      state.auth.username = $('#auth-basic-username').val() || '';
+      state.auth.password = $('#auth-basic-password').val() || '';
+    } else if (state.auth.type === 'bearer') {
+      state.auth.token = $('#auth-bearer-token').val() || '';
+    } else if (state.auth.type === 'api-key') {
+      state.auth.keyName = $('#auth-api-key-name').val() || '';
+      state.auth.keyValue = $('#auth-api-key-value').val() || '';
+      state.auth.location = $('#auth-api-key-location').val() || 'header';
+    } else if (state.auth.type === 'oauth2') {
+      state.auth.grantType = $('#auth-oauth2-grant-type').val() || 'authorization_code';
+      state.auth.tokenUrl = $('#auth-oauth2-token-url').val() || '';
+      state.auth.authUrl = $('#auth-oauth2-auth-url').val() || '';
+      state.auth.clientId = $('#auth-oauth2-client-id').val() || '';
+      state.auth.clientSecret = $('#auth-oauth2-client-secret').val() || '';
+      state.auth.redirectUri = $('#auth-oauth2-redirect-uri').val() || '';
+      state.auth.scope = $('#auth-oauth2-scope').val() || '';
+      state.auth.username = $('#auth-oauth2-username').val() || '';
+      state.auth.password = $('#auth-oauth2-password').val() || '';
+      state.auth.accessToken = $('#auth-oauth2-access-token').val() || '';
+      state.auth.refreshToken = $('#auth-oauth2-access-token').data('refresh-token') || '';
+      state.auth.tokenExpires = $('#oauth2-token-expires').text() || '';
+    }
+
+    // Get body
+    if (selectedBodyType === 'json') {
+      state.body.content = $('#body-json-input').val() || '';
+    } else if (selectedBodyType === 'xml') {
+      state.body.content = $('#body-xml-input').val() || '';
+    } else if (selectedBodyType === 'raw') {
+      state.body.content = $('#body-raw-input').val() || '';
+      state.body.contentType = $('#body-raw-content-type').val() || '';
+    } else if (selectedBodyType === 'form') {
+      state.body.fields = [];
+      $('#form-fields-container .form-field-row').each(function() {
+        const key = $(this).find('.form-field-key').val() || '';
+        const value = $(this).find('.form-field-value').val() || '';
+        if (key || value) {
+          state.body.fields.push({ key, value });
+        }
+      });
+    } else if (selectedBodyType === 'schema') {
+      state.body.schema = $('#body-schema-input').val() || '';
+      state.body.values = getSchemaFormValues ? getSchemaFormValues() : {};
+    }
+
+    return state;
+  }
+
+  // Check if current form has unsaved changes
+  function hasUnsavedChanges() {
+    if (!originalRequestState || !currentRequestId) {
+      return false;
+    }
+
+    const currentState = getCurrentFormState();
+    return JSON.stringify(originalRequestState) !== JSON.stringify(currentState);
+  }
+
+  // Check if any request has unsaved changes
+  function hasAnyUnsavedChanges() {
+    // Check current form first
+    if (hasUnsavedChanges()) {
+      return true;
+    }
+
+    // Check stored unsaved data
+    return Object.keys(unsavedRequestData).length > 0;
+  }
+
+  // Check if a specific request has unsaved changes
+  function requestHasUnsavedChanges(requestId) {
+    if (requestId === currentRequestId) {
+      return hasUnsavedChanges();
+    }
+    return unsavedRequestData.hasOwnProperty(requestId);
+  }
+
+  // Store unsaved data for current request before switching
+  function storeUnsavedDataForCurrentRequest() {
+    if (currentRequestId && hasUnsavedChanges()) {
+      unsavedRequestData[currentRequestId] = getCurrentFormState();
+    }
+  }
+
+  // Clear unsaved data for a specific request (after saving)
+  function clearUnsavedDataForRequest(requestId) {
+    delete unsavedRequestData[requestId];
+    updateUnsavedBadge();
+    renderCollections(); // Re-render to update badges
+  }
+
+  // Update unsaved badge visibility
+  function updateUnsavedBadge() {
+    const $badge = $('#unsaved-badge');
+    const $saveBtn = $('#save-request-btn');
+
+    if (hasUnsavedChanges()) {
+      $badge.removeClass('hidden');
+      $saveBtn.addClass('has-changes');
+    } else {
+      $badge.addClass('hidden');
+      $saveBtn.removeClass('has-changes');
+    }
+
+    // Update sidebar request badges
+    updateSidebarUnsavedBadges();
+  }
+
+  // Update unsaved badges on sidebar requests
+  function updateSidebarUnsavedBadges() {
+    $('.request-item').each(function() {
+      const requestId = $(this).data('request-id');
+      const $badge = $(this).find('.request-unsaved-badge');
+
+      if (requestHasUnsavedChanges(requestId)) {
+        if ($badge.length === 0) {
+          $(this).find('.request-name').after('<span class="request-unsaved-badge"></span>');
+        }
+      } else {
+        $badge.remove();
+      }
+    });
+  }
+
+  // Store original state after loading a request
+  function storeOriginalState() {
+    originalRequestState = getCurrentFormState();
+    updateUnsavedBadge();
+  }
+
+  // Clear original state (when creating new request or clearing form)
+  function clearOriginalState() {
+    originalRequestState = null;
+    updateUnsavedBadge();
+  }
+
+  // Debounced check for unsaved changes
+  const debouncedCheckChanges = debounce(updateUnsavedBadge, 150);
+
+  // Listen for changes on all request input fields
+  $(document).on('input change', '#request-name, #method-select, #url-input, .param-key, .param-value, .header-key, .header-value, #auth-type, #auth-basic-username, #auth-basic-password, #auth-bearer-token, #auth-api-key-name, #auth-api-key-value, #auth-api-key-location, #auth-oauth2-grant-type, #auth-oauth2-token-url, #auth-oauth2-auth-url, #auth-oauth2-client-id, #auth-oauth2-client-secret, #auth-oauth2-redirect-uri, #auth-oauth2-scope, #auth-oauth2-username, #auth-oauth2-password, #body-json-input, #body-xml-input, #body-raw-input, #body-raw-content-type, .form-field-key, .form-field-value, #body-schema-input, .schema-field-input', function() {
+    debouncedCheckChanges();
   });
 
   function loadRequestIntoForm(request) {
     // Show request name bar
     $('#request-name-bar').removeClass('hidden');
-    $('#request-name').val(request.name);
 
-    // Set method and URL
-    $('#method-select').val(request.method);
-    $('#url-input').val(request.url);
+    // Check if there's unsaved data for this request
+    const unsavedState = unsavedRequestData[request.id];
+
+    if (unsavedState) {
+      // Load unsaved state
+      loadFormState(unsavedState);
+      // Clear from unsaved data since it's now in the form
+      delete unsavedRequestData[request.id];
+    } else {
+      // Load saved request data
+      loadFormState({
+        name: request.name,
+        method: request.method,
+        url: request.url,
+        params: request.params || [],
+        headers: request.headers || [],
+        auth: request.auth || { type: 'none' },
+        body: request.body || { type: 'none', content: '' }
+      });
+    }
+
+    // Trigger variable detection after loading request
+    updateVariablesWithDetected();
+
+    // Store original state (from saved request, not unsaved changes)
+    // This ensures we compare against the last saved version
+    setTimeout(function() {
+      originalRequestState = {
+        name: request.name,
+        method: request.method,
+        url: request.url,
+        params: request.params || [],
+        headers: request.headers || [],
+        auth: request.auth || { type: 'none' },
+        body: request.body || { type: 'none', content: '' }
+      };
+      updateUnsavedBadge();
+    }, 50);
+  }
+
+  // Load a form state object into the form fields
+  function loadFormState(state) {
+    $('#request-name').val(state.name || '');
+    $('#method-select').val(state.method || 'GET');
+    $('#url-input').val(state.url || '');
 
     // Load params
     $('#params-container').empty();
-    if (request.params && request.params.length > 0) {
-      request.params.forEach(function(param) {
+    if (state.params && state.params.length > 0) {
+      state.params.forEach(function(param) {
         addKeyValueRow('#params-container', 'param', param.key, param.value);
       });
     } else {
@@ -961,8 +1433,8 @@ $(document).ready(function() {
 
     // Load headers
     $('#headers-container').empty();
-    if (request.headers && request.headers.length > 0) {
-      request.headers.forEach(function(header) {
+    if (state.headers && state.headers.length > 0) {
+      state.headers.forEach(function(header) {
         addKeyValueRow('#headers-container', 'header', header.key, header.value);
       });
     } else {
@@ -970,7 +1442,7 @@ $(document).ready(function() {
     }
 
     // Load auth
-    const auth = request.auth || { type: 'none' };
+    const auth = state.auth || { type: 'none' };
     $('#auth-type').val(auth.type).trigger('change');
     if (auth.type === 'basic') {
       $('#auth-basic-username').val(auth.username || '');
@@ -981,10 +1453,33 @@ $(document).ready(function() {
       $('#auth-api-key-name').val(auth.keyName || '');
       $('#auth-api-key-value').val(auth.keyValue || '');
       $('#auth-api-key-location').val(auth.location || 'header');
+    } else if (auth.type === 'oauth2') {
+      $('#auth-oauth2-grant-type').val(auth.grantType || 'authorization_code').trigger('change');
+      $('#auth-oauth2-token-url').val(auth.tokenUrl || '');
+      $('#auth-oauth2-auth-url').val(auth.authUrl || '');
+      $('#auth-oauth2-client-id').val(auth.clientId || '');
+      $('#auth-oauth2-client-secret').val(auth.clientSecret || '');
+      $('#auth-oauth2-redirect-uri').val(auth.redirectUri || '');
+      $('#auth-oauth2-scope').val(auth.scope || '');
+      $('#auth-oauth2-username').val(auth.username || '');
+      $('#auth-oauth2-password').val(auth.password || '');
+      $('#auth-oauth2-access-token').val(auth.accessToken || '');
+
+      if (auth.refreshToken) {
+        $('#auth-oauth2-access-token').data('refresh-token', auth.refreshToken);
+      }
+
+      if (auth.tokenExpires) {
+        $('#oauth2-token-expires').text(auth.tokenExpires);
+      }
+
+      if (auth.accessToken) {
+        $('#oauth2-token-display').removeClass('hidden');
+      }
     }
 
     // Load body
-    const body = request.body || { type: 'none', content: '' };
+    const body = state.body || { type: 'none', content: '' };
     selectedBodyType = body.type;
     $('.body-type-btn').removeClass('active');
     $(`.body-type-btn[data-body-type="${body.type}"]`).addClass('active');
@@ -1022,9 +1517,6 @@ $(document).ready(function() {
       $('.schema-tab-content').addClass('hidden');
       $('#schema-editor-tab').removeClass('hidden');
     }
-
-    // Trigger variable detection after loading request
-    updateVariablesWithDetected();
   }
 
   function saveRequestFromForm(request) {
@@ -1064,6 +1556,19 @@ $(document).ready(function() {
       request.auth.keyName = $('#auth-api-key-name').val();
       request.auth.keyValue = $('#auth-api-key-value').val();
       request.auth.location = $('#auth-api-key-location').val();
+    } else if (authType === 'oauth2') {
+      request.auth.grantType = $('#auth-oauth2-grant-type').val();
+      request.auth.tokenUrl = $('#auth-oauth2-token-url').val();
+      request.auth.authUrl = $('#auth-oauth2-auth-url').val();
+      request.auth.clientId = $('#auth-oauth2-client-id').val();
+      request.auth.clientSecret = $('#auth-oauth2-client-secret').val();
+      request.auth.redirectUri = $('#auth-oauth2-redirect-uri').val();
+      request.auth.scope = $('#auth-oauth2-scope').val();
+      request.auth.username = $('#auth-oauth2-username').val();
+      request.auth.password = $('#auth-oauth2-password').val();
+      request.auth.accessToken = $('#auth-oauth2-access-token').val();
+      request.auth.refreshToken = $('#auth-oauth2-access-token').data('refresh-token') || '';
+      request.auth.tokenExpires = $('#oauth2-token-expires').text();
     }
 
     // Save body
@@ -1127,6 +1632,9 @@ $(document).ready(function() {
 
     // Trigger variable detection after clearing
     updateVariablesWithDetected();
+
+    // Clear dirty state tracking
+    clearOriginalState();
   }
 
   // Export collections
@@ -1183,6 +1691,259 @@ $(document).ready(function() {
 
     // Reset input
     $(this).val('');
+  });
+
+  // History management functions
+  function loadHistory() {
+    chrome.storage.local.get(['patchman_history'], function(result) {
+      requestHistory = result.patchman_history || [];
+      renderHistory();
+    });
+  }
+
+  function saveHistory() {
+    chrome.storage.local.set({ patchman_history: requestHistory }, function() {
+      renderHistory();
+    });
+  }
+
+  function addToHistory(requestData, responseData) {
+    const historyItem = {
+      id: generateId(),
+      timestamp: Date.now(),
+      method: requestData.method,
+      url: requestData.url,
+      params: requestData.params,
+      headers: requestData.headers,
+      auth: requestData.auth,
+      body: requestData.body,
+      response: {
+        status: responseData.status,
+        headers: responseData.headers,
+        body: responseData.body,
+        duration: responseData.duration
+      }
+    };
+
+    // Add to beginning of array
+    requestHistory.unshift(historyItem);
+
+    // Limit history size
+    if (requestHistory.length > MAX_HISTORY_ITEMS) {
+      requestHistory = requestHistory.slice(0, MAX_HISTORY_ITEMS);
+    }
+
+    saveHistory();
+  }
+
+  function renderHistory() {
+    const $list = $('#history-list');
+    const $empty = $('#empty-history');
+
+    $list.find('.history-item').remove();
+
+    if (requestHistory.length === 0) {
+      $empty.removeClass('hidden');
+      return;
+    }
+
+    $empty.addClass('hidden');
+
+    requestHistory.forEach(function(item) {
+      const timeAgo = formatTimeAgo(item.timestamp);
+      const urlDisplay = truncateUrl(item.url);
+      // Support both old format (item.status) and new format (item.response.status)
+      const status = item.response ? item.response.status : item.status;
+      let statusClass = 'warning';
+      if (status >= 200 && status < 300) {
+        statusClass = 'success';
+      } else if (status >= 400 || status === 0) {
+        statusClass = 'error';
+      }
+
+      const $item = $(`
+        <div class="history-item" data-history-id="${item.id}">
+          <span class="history-item-method ${item.method}">${item.method}</span>
+          <div class="history-item-info">
+            <div class="history-item-url" title="${escapeHtml(item.url)}">${escapeHtml(urlDisplay)}</div>
+            <div class="history-item-time">${timeAgo}</div>
+          </div>
+          <span class="history-item-status ${statusClass}">${status || 'ERR'}</span>
+          <button class="history-item-delete" title="Remove">
+            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+            </svg>
+          </button>
+        </div>
+      `);
+
+      $list.append($item);
+    });
+  }
+
+  function formatTimeAgo(timestamp) {
+    const seconds = Math.floor((Date.now() - timestamp) / 1000);
+
+    if (seconds < 60) return 'Just now';
+    if (seconds < 3600) return Math.floor(seconds / 60) + 'm ago';
+    if (seconds < 86400) return Math.floor(seconds / 3600) + 'h ago';
+    if (seconds < 604800) return Math.floor(seconds / 86400) + 'd ago';
+
+    const date = new Date(timestamp);
+    return date.toLocaleDateString();
+  }
+
+  function truncateUrl(url) {
+    try {
+      const urlObj = new URL(url);
+      let display = urlObj.pathname;
+      if (urlObj.search) {
+        display += urlObj.search.length > 20 ? urlObj.search.substring(0, 20) + '...' : urlObj.search;
+      }
+      return display || '/';
+    } catch (e) {
+      return url.length > 40 ? url.substring(0, 40) + '...' : url;
+    }
+  }
+
+  // Load history item into form
+  $(document).on('click', '.history-item', function(e) {
+    if ($(e.target).closest('.history-item-delete').length) return;
+
+    const historyId = $(this).data('history-id');
+    const item = requestHistory.find(h => h.id === historyId);
+
+    if (item) {
+      // Store unsaved data for current request before switching
+      storeUnsavedDataForCurrentRequest();
+
+      loadHistoryIntoForm(item);
+      $('.history-item').removeClass('active');
+      $(this).addClass('active');
+    }
+  });
+
+  function loadHistoryIntoForm(item) {
+    // Clear current request context (no longer editing a saved request)
+    currentRequestId = null;
+    currentCollectionId = null;
+    $('#request-name-bar').addClass('hidden');
+    $('.request-item').removeClass('active');
+
+    // Set method and URL
+    $('#method-select').val(item.method);
+    $('#url-input').val(item.url);
+
+    // Load params
+    $('#params-container').empty();
+    if (item.params && item.params.length > 0) {
+      item.params.forEach(function(param) {
+        addKeyValueRow('#params-container', 'param', param.key, param.value);
+      });
+    } else {
+      addKeyValueRow('#params-container', 'param');
+    }
+
+    // Load headers
+    $('#headers-container').empty();
+    if (item.headers && item.headers.length > 0) {
+      item.headers.forEach(function(header) {
+        addKeyValueRow('#headers-container', 'header', header.key, header.value);
+      });
+    } else {
+      addKeyValueRow('#headers-container', 'header');
+    }
+
+    // Load auth
+    const auth = item.auth || { type: 'none' };
+    $('#auth-type').val(auth.type).trigger('change');
+    if (auth.type === 'basic') {
+      $('#auth-basic-username').val(auth.username || '');
+      $('#auth-basic-password').val(auth.password || '');
+    } else if (auth.type === 'bearer') {
+      $('#auth-bearer-token').val(auth.token || '');
+    } else if (auth.type === 'api-key') {
+      $('#auth-api-key-name').val(auth.keyName || '');
+      $('#auth-api-key-value').val(auth.keyValue || '');
+      $('#auth-api-key-location').val(auth.location || 'header');
+    }
+
+    // Load body
+    const body = item.body || { type: 'none', content: '' };
+    selectedBodyType = body.type;
+    $('.body-type-btn').removeClass('active');
+    $(`.body-type-btn[data-body-type="${body.type}"]`).addClass('active');
+    $('.body-content').addClass('hidden');
+    $(`#body-${body.type}`).removeClass('hidden');
+
+    if (body.type === 'json') {
+      $('#body-json-input').val(body.content || '');
+    } else if (body.type === 'xml') {
+      $('#body-xml-input').val(body.content || '');
+    } else if (body.type === 'raw') {
+      $('#body-raw-input').val(body.content || '');
+      $('#body-raw-content-type').val(body.contentType || '');
+    } else if (body.type === 'form') {
+      $('#form-fields-container').empty();
+      if (body.fields && body.fields.length > 0) {
+        body.fields.forEach(function(field) {
+          addKeyValueRow('#form-fields-container', 'form-field', field.key, field.value);
+        });
+      } else {
+        addKeyValueRow('#form-fields-container', 'form-field');
+      }
+    } else if (body.type === 'schema') {
+      $('#body-schema-input').val(body.schema || '');
+      currentSchemaValues = body.values || {};
+      if (body.schema) {
+        renderSchemaForm();
+      }
+    }
+
+    // Trigger variable detection
+    updateVariablesWithDetected();
+
+    // Show the saved response if available
+    hideError();
+    if (item.response && item.response.status !== undefined) {
+      showResponse(
+        item.response.status,
+        item.response.body || '',
+        item.response.headers || '',
+        item.response.duration || 0
+      );
+    } else if (item.status !== undefined) {
+      // Support old format
+      hideResponse();
+    } else {
+      hideResponse();
+    }
+  }
+
+  // Delete history item
+  $(document).on('click', '.history-item-delete', function(e) {
+    e.stopPropagation();
+    const $item = $(this).closest('.history-item');
+    const historyId = $item.data('history-id');
+
+    requestHistory = requestHistory.filter(h => h.id !== historyId);
+    saveHistory();
+  });
+
+  // Clear all history
+  $('#clear-history-btn').on('click', function(e) {
+    e.stopPropagation();
+
+    if (requestHistory.length === 0) return;
+
+    showConfirmModal(
+      'Clear History',
+      'Are you sure you want to clear all request history?',
+      function() {
+        requestHistory = [];
+        saveHistory();
+      }
+    );
   });
 
   // Schema form tab switching
@@ -1704,6 +2465,97 @@ $(document).ready(function() {
     }
   });
 
+  // OAuth2 grant type switching
+  $('#auth-oauth2-grant-type').on('change', function() {
+    const grantType = $(this).val();
+
+    // Hide all optional fields first
+    $('#oauth2-auth-url-field').addClass('hidden');
+    $('#oauth2-redirect-uri-field').addClass('hidden');
+    $('#oauth2-username-field').addClass('hidden');
+    $('#oauth2-password-field').addClass('hidden');
+
+    // Show fields based on grant type
+    if (grantType === 'authorization_code' || grantType === 'implicit') {
+      $('#oauth2-auth-url-field').removeClass('hidden');
+      $('#oauth2-redirect-uri-field').removeClass('hidden');
+    } else if (grantType === 'password') {
+      $('#oauth2-username-field').removeClass('hidden');
+      $('#oauth2-password-field').removeClass('hidden');
+    }
+  });
+
+  // OAuth2 Get Token button
+  $('#oauth2-get-token-btn').on('click', async function() {
+    const grantType = $('#auth-oauth2-grant-type').val();
+    const tokenUrl = interpolateVariables($('#auth-oauth2-token-url').val().trim());
+    const clientId = interpolateVariables($('#auth-oauth2-client-id').val().trim());
+    const clientSecret = interpolateVariables($('#auth-oauth2-client-secret').val().trim());
+    const scope = interpolateVariables($('#auth-oauth2-scope').val().trim());
+
+    if (!tokenUrl || !clientId) {
+      showError('Token URL and Client ID are required');
+      return;
+    }
+
+    try {
+      let tokenData;
+
+      if (grantType === 'client_credentials') {
+        tokenData = await getOAuth2TokenClientCredentials(tokenUrl, clientId, clientSecret, scope);
+      } else if (grantType === 'password') {
+        const username = interpolateVariables($('#auth-oauth2-username').val().trim());
+        const password = interpolateVariables($('#auth-oauth2-password').val().trim());
+
+        if (!username || !password) {
+          showError('Username and Password are required for Password grant');
+          return;
+        }
+
+        tokenData = await getOAuth2TokenPassword(tokenUrl, clientId, clientSecret, username, password, scope);
+      } else if (grantType === 'authorization_code' || grantType === 'implicit') {
+        const authUrl = interpolateVariables($('#auth-oauth2-auth-url').val().trim());
+        const redirectUri = interpolateVariables($('#auth-oauth2-redirect-uri').val().trim());
+
+        if (!authUrl) {
+          showError('Authorization URL is required for Authorization Code grant');
+          return;
+        }
+
+        tokenData = await getOAuth2TokenAuthorizationCode(authUrl, tokenUrl, clientId, clientSecret, redirectUri, scope, grantType);
+      }
+
+      if (tokenData && tokenData.access_token) {
+        $('#auth-oauth2-access-token').val(tokenData.access_token);
+        $('#oauth2-token-display').removeClass('hidden');
+
+        // Calculate expiration time
+        if (tokenData.expires_in) {
+          const expiresAt = new Date(Date.now() + (tokenData.expires_in * 1000));
+          $('#oauth2-token-expires').text(expiresAt.toLocaleString());
+        } else {
+          $('#oauth2-token-expires').text('N/A');
+        }
+
+        // Store refresh token if available
+        if (tokenData.refresh_token) {
+          $('#auth-oauth2-access-token').data('refresh-token', tokenData.refresh_token);
+        }
+
+        showSuccess('Access token obtained successfully!');
+      }
+    } catch (error) {
+      showError(`Failed to obtain access token: ${error.message}`);
+    }
+  });
+
+  // OAuth2 Clear Token button
+  $('#oauth2-clear-token-btn').on('click', function() {
+    $('#auth-oauth2-access-token').val('').removeData('refresh-token');
+    $('#oauth2-token-expires').text('N/A');
+    $('#oauth2-token-display').addClass('hidden');
+  });
+
   // Body type switching
   $('.body-type-btn').on('click', function() {
     const bodyType = $(this).data('body-type');
@@ -1712,34 +2564,41 @@ $(document).ready(function() {
     $(this).addClass('active');
     $('.body-content').addClass('hidden');
     $(`#body-${bodyType}`).removeClass('hidden');
+    debouncedCheckChanges(); // Check for unsaved changes
   });
 
   // Add parameter row
   $('#add-param-btn').on('click', function() {
     addKeyValueRow('#params-container', 'param');
+    debouncedCheckChanges();
   });
 
   // Add header row
   $('#add-header-btn').on('click', function() {
     addKeyValueRow('#headers-container', 'header');
+    debouncedCheckChanges();
   });
 
   // Add form field row
   $('#add-form-field-btn').on('click', function() {
     addKeyValueRow('#form-fields-container', 'form-field');
+    debouncedCheckChanges();
   });
 
   // Remove row handlers (delegated)
   $(document).on('click', '.remove-param-btn', function() {
     removeRow($(this), '#params-container', 'param');
+    debouncedCheckChanges();
   });
 
   $(document).on('click', '.remove-header-btn', function() {
     removeRow($(this), '#headers-container', 'header');
+    debouncedCheckChanges();
   });
 
   $(document).on('click', '.remove-form-field-btn', function() {
     removeRow($(this), '#form-fields-container', 'form-field');
+    debouncedCheckChanges();
   });
 
   function addKeyValueRow(container, prefix, key = '', value = '') {
@@ -1799,6 +2658,208 @@ $(document).ready(function() {
     }
   });
 
+  // OAuth2 helper functions
+  async function getOAuth2TokenClientCredentials(tokenUrl, clientId, clientSecret, scope) {
+    const body = new URLSearchParams({
+      grant_type: 'client_credentials',
+      client_id: clientId,
+      scope: scope || ''
+    });
+
+    if (clientSecret) {
+      body.append('client_secret', clientSecret);
+    }
+
+    const response = await fetch(tokenUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: body.toString()
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+    }
+
+    return await response.json();
+  }
+
+  async function getOAuth2TokenPassword(tokenUrl, clientId, clientSecret, username, password, scope) {
+    const body = new URLSearchParams({
+      grant_type: 'password',
+      client_id: clientId,
+      username: username,
+      password: password,
+      scope: scope || ''
+    });
+
+    if (clientSecret) {
+      body.append('client_secret', clientSecret);
+    }
+
+    const response = await fetch(tokenUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: body.toString()
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+    }
+
+    return await response.json();
+  }
+
+  async function getOAuth2TokenAuthorizationCode(authUrl, tokenUrl, clientId, clientSecret, redirectUri, scope, grantType) {
+    return new Promise((resolve, reject) => {
+      // Generate PKCE code verifier and challenge for security
+      const codeVerifier = generateRandomString(128);
+      const state = generateRandomString(32);
+
+      // Build authorization URL
+      const authParams = new URLSearchParams({
+        client_id: clientId,
+        redirect_uri: redirectUri || chrome.identity.getRedirectURL(),
+        response_type: grantType === 'implicit' ? 'token' : 'code',
+        scope: scope || '',
+        state: state
+      });
+
+      const fullAuthUrl = `${authUrl}?${authParams.toString()}`;
+
+      // Open OAuth2 authorization window
+      chrome.identity.launchWebAuthFlow(
+        {
+          url: fullAuthUrl,
+          interactive: true
+        },
+        async (responseUrl) => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+            return;
+          }
+
+          try {
+            const url = new URL(responseUrl);
+
+            if (grantType === 'implicit') {
+              // For implicit flow, token is in the fragment
+              const params = new URLSearchParams(url.hash.substring(1));
+              const accessToken = params.get('access_token');
+              const expiresIn = params.get('expires_in');
+
+              if (accessToken) {
+                resolve({
+                  access_token: accessToken,
+                  expires_in: expiresIn ? parseInt(expiresIn) : null,
+                  token_type: params.get('token_type') || 'Bearer'
+                });
+              } else {
+                reject(new Error('No access token in response'));
+              }
+            } else {
+              // For authorization code flow, exchange code for token
+              const code = url.searchParams.get('code');
+              const returnedState = url.searchParams.get('state');
+
+              if (returnedState !== state) {
+                reject(new Error('State mismatch - possible CSRF attack'));
+                return;
+              }
+
+              if (!code) {
+                reject(new Error('No authorization code in response'));
+                return;
+              }
+
+              // Exchange authorization code for access token
+              const body = new URLSearchParams({
+                grant_type: 'authorization_code',
+                code: code,
+                client_id: clientId,
+                redirect_uri: redirectUri || chrome.identity.getRedirectURL()
+              });
+
+              if (clientSecret) {
+                body.append('client_secret', clientSecret);
+              }
+
+              const response = await fetch(tokenUrl, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/x-www-form-urlencoded'
+                },
+                body: body.toString()
+              });
+
+              if (!response.ok) {
+                reject(new Error(`HTTP ${response.status}: ${await response.text()}`));
+                return;
+              }
+
+              const tokenData = await response.json();
+              resolve(tokenData);
+            }
+          } catch (error) {
+            reject(error);
+          }
+        }
+      );
+    });
+  }
+
+  function generateRandomString(length) {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
+    let result = '';
+
+    for (let i = 0; i < length; i++) {
+      result += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+
+    return result;
+  }
+
+  async function refreshOAuth2Token(tokenUrl, clientId, clientSecret, refreshToken) {
+    const body = new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken,
+      client_id: clientId
+    });
+
+    if (clientSecret) {
+      body.append('client_secret', clientSecret);
+    }
+
+    const response = await fetch(tokenUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: body.toString()
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+    }
+
+    return await response.json();
+  }
+
+  function showSuccess(message) {
+    // Hide loading and error sections
+    $('#loading').addClass('hidden');
+    $('#error-section').addClass('hidden');
+
+    // Show temporary success message
+    const $successMsg = $('<div class="p-5 bg-emerald-500/10 border border-emerald-500/30 rounded-xl mt-4"><div class="flex items-center gap-3 text-emerald-400"><svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg><span class="font-semibold text-lg">Success</span></div><p class="text-sm text-emerald-300 mt-2">' + message + '</p></div>');
+    $successMsg.insertAfter('#loading');
+
+    setTimeout(() => $successMsg.fadeOut(() => $successMsg.remove()), 3000);
+  }
+
   function buildUrl(baseUrl) {
     // Interpolate the base URL
     const interpolatedBaseUrl = interpolateVariables(baseUrl);
@@ -1845,6 +2906,12 @@ $(document).ready(function() {
 
       if (token) {
         headers['Authorization'] = `Bearer ${token}`;
+      }
+    } else if (authType === 'oauth2') {
+      const accessToken = $('#auth-oauth2-access-token').val().trim();
+
+      if (accessToken) {
+        headers['Authorization'] = `Bearer ${accessToken}`;
       }
     } else if (authType === 'api-key' && $('#auth-api-key-location').val() === 'header') {
       const keyName = interpolateVariables($('#auth-api-key-name').val().trim());
@@ -1930,6 +2997,14 @@ $(document).ready(function() {
   }
 
   function sendRequest() {
+    // Check for missing variables before sending
+    const missingVars = getMissingVariables();
+    if (missingVars.length > 0) {
+      const varList = missingVars.map(v => `\${var:${v}}`).join(', ');
+      showError(`Missing variable values: ${varList}. Please set values for these variables before sending the request.`);
+      return;
+    }
+
     const method = $('#method-select').val();
     const baseUrl = $('#url-input').val().trim();
 
@@ -1949,6 +3024,9 @@ $(document).ready(function() {
       return;
     }
 
+    // Capture current request data for history (before interpolation for storage)
+    const requestDataForHistory = captureRequestData();
+
     hideError();
     hideResponse();
     showLoading();
@@ -1963,18 +3041,43 @@ $(document).ready(function() {
       success: function(data, textStatus, xhr) {
         const endTime = performance.now();
         const duration = Math.round(endTime - startTime);
+        const responseHeaders = xhr.getAllResponseHeaders();
         hideLoading();
-        showResponse(xhr.status, data, xhr.getAllResponseHeaders(), duration);
+        showResponse(xhr.status, data, responseHeaders, duration);
+
+        // Add to history with full response data
+        addToHistory(requestDataForHistory, {
+          status: xhr.status,
+          headers: responseHeaders,
+          body: data,
+          duration: duration
+        });
       },
       error: function(xhr, textStatus, errorThrown) {
         const endTime = performance.now();
         const duration = Math.round(endTime - startTime);
+        const responseHeaders = xhr.getAllResponseHeaders();
+        const responseBody = xhr.responseText || errorThrown;
         hideLoading();
 
         if (xhr.status === 0) {
           showError(`Network error: Could not connect to ${url}. Check if the URL is correct and CORS is enabled.`);
+          // Add to history with status 0
+          addToHistory(requestDataForHistory, {
+            status: 0,
+            headers: '',
+            body: `Network error: Could not connect to ${url}`,
+            duration: duration
+          });
         } else {
-          showResponse(xhr.status, xhr.responseText || errorThrown, xhr.getAllResponseHeaders(), duration);
+          showResponse(xhr.status, responseBody, responseHeaders, duration);
+          // Add to history
+          addToHistory(requestDataForHistory, {
+            status: xhr.status,
+            headers: responseHeaders,
+            body: responseBody,
+            duration: duration
+          });
         }
       }
     };
@@ -1985,6 +3088,71 @@ $(document).ready(function() {
     }
 
     $.ajax(ajaxConfig);
+  }
+
+  // Capture current request data for history storage
+  function captureRequestData() {
+    const method = $('#method-select').val();
+    const url = $('#url-input').val().trim();
+
+    // Capture params
+    const params = [];
+    $('#params-container .param-row').each(function() {
+      const key = $(this).find('.param-key').val().trim();
+      const value = $(this).find('.param-value').val().trim();
+      if (key) {
+        params.push({ key, value });
+      }
+    });
+
+    // Capture headers
+    const headers = [];
+    $('#headers-container .header-row').each(function() {
+      const key = $(this).find('.header-key').val().trim();
+      const value = $(this).find('.header-value').val().trim();
+      if (key) {
+        headers.push({ key, value });
+      }
+    });
+
+    // Capture auth
+    const authType = $('#auth-type').val();
+    const auth = { type: authType };
+    if (authType === 'basic') {
+      auth.username = $('#auth-basic-username').val();
+      auth.password = $('#auth-basic-password').val();
+    } else if (authType === 'bearer') {
+      auth.token = $('#auth-bearer-token').val();
+    } else if (authType === 'api-key') {
+      auth.keyName = $('#auth-api-key-name').val();
+      auth.keyValue = $('#auth-api-key-value').val();
+      auth.location = $('#auth-api-key-location').val();
+    }
+
+    // Capture body
+    const body = { type: selectedBodyType };
+    if (selectedBodyType === 'json') {
+      body.content = $('#body-json-input').val();
+    } else if (selectedBodyType === 'xml') {
+      body.content = $('#body-xml-input').val();
+    } else if (selectedBodyType === 'raw') {
+      body.content = $('#body-raw-input').val();
+      body.contentType = $('#body-raw-content-type').val();
+    } else if (selectedBodyType === 'form') {
+      body.fields = [];
+      $('#form-fields-container .form-field-row').each(function() {
+        const key = $(this).find('.form-field-key').val().trim();
+        const value = $(this).find('.form-field-value').val().trim();
+        if (key) {
+          body.fields.push({ key, value });
+        }
+      });
+    } else if (selectedBodyType === 'schema') {
+      body.schema = $('#body-schema-input').val();
+      body.values = getSchemaFormValues();
+    }
+
+    return { method, url, params, headers, auth, body };
   }
 
   function showLoading() {
